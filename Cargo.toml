@@ -1,0 +1,14 @@
+[package]
+name = "seastar-rpc-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Seastar RPC async Rust server/client"
+repository = "https://github.com/sitano/seastar-rpc-rs"
+keywords = ["seastar", "scylla", "rpc"]
+categories = ["asynchronous", "network-programming", "database"]
+license = "MIT"
+
+[dependencies]
+
+[lib]
+path = "src/lib.rs"
