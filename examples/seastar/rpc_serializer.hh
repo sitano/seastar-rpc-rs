@@ -46,6 +46,21 @@ T read_arithmetic_type(Input& in) {
     return v;
 }
 
+// Overloads must cover every type used in a verb signature: without one,
+// C++ promotion silently routes e.g. bool/int16_t to the int32_t overload
+// and float to the double one, changing the wire size.
+template <typename Output>
+inline void write(serializer, Output& output, bool v) { return write_arithmetic_type(output, uint8_t(v)); }
+template <typename Output>
+inline void write(serializer, Output& output, int8_t v) { return write_arithmetic_type(output, v); }
+template <typename Output>
+inline void write(serializer, Output& output, uint8_t v) { return write_arithmetic_type(output, v); }
+template <typename Output>
+inline void write(serializer, Output& output, int16_t v) { return write_arithmetic_type(output, v); }
+template <typename Output>
+inline void write(serializer, Output& output, uint16_t v) { return write_arithmetic_type(output, v); }
+template <typename Output>
+inline void write(serializer, Output& output, float v) { return write_arithmetic_type(output, v); }
 template <typename Output>
 inline void write(serializer, Output& output, int32_t v) { return write_arithmetic_type(output, v); }
 template <typename Output>
@@ -56,6 +71,18 @@ template <typename Output>
 inline void write(serializer, Output& output, uint64_t v) { return write_arithmetic_type(output, v); }
 template <typename Output>
 inline void write(serializer, Output& output, double v) { return write_arithmetic_type(output, v); }
+template <typename Input>
+inline bool read(serializer, Input& input, rpc::type<bool>) { return read_arithmetic_type<uint8_t>(input) != 0; }
+template <typename Input>
+inline int8_t read(serializer, Input& input, rpc::type<int8_t>) { return read_arithmetic_type<int8_t>(input); }
+template <typename Input>
+inline uint8_t read(serializer, Input& input, rpc::type<uint8_t>) { return read_arithmetic_type<uint8_t>(input); }
+template <typename Input>
+inline int16_t read(serializer, Input& input, rpc::type<int16_t>) { return read_arithmetic_type<int16_t>(input); }
+template <typename Input>
+inline uint16_t read(serializer, Input& input, rpc::type<uint16_t>) { return read_arithmetic_type<uint16_t>(input); }
+template <typename Input>
+inline float read(serializer, Input& input, rpc::type<float>) { return read_arithmetic_type<float>(input); }
 template <typename Input>
 inline int32_t read(serializer, Input& input, rpc::type<int32_t>) { return read_arithmetic_type<int32_t>(input); }
 template <typename Input>
