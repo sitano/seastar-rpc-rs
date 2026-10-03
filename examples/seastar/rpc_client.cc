@@ -1,5 +1,6 @@
 #include <iostream>
 #include <seastar/core/app-template.hh>
+#include <seastar/core/do_with.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
@@ -74,32 +75,35 @@ int main(int ac, char** av) {
             co.compressor_factory = &mc;
         }
 
-        auto myrpc = std::make_unique<rpc::protocol<serializer>>(serializer{});
-        myrpc->set_logger(&lg);
+        return do_with(
+                rpc::protocol<serializer>(serializer{}),
+                std::unique_ptr<rpc::protocol<serializer>::client>(),
+                [&] (auto& myrpc, auto& client) {
+            myrpc.set_logger(&lg);
 
-        auto client = std::make_unique<rpc::protocol<serializer>::client>(*myrpc, co, ipv4_addr{config["server"].as<std::string>()});
+            client = std::make_unique<rpc::protocol<serializer>::client>(
+                    myrpc, co, ipv4_addr{config["server"].as<std::string>()});
 
-        future<> call = make_ready_future<>();
-        try {
-            call = dispatch_verb(*myrpc, *client, verb, args, timeout);
-        } catch (std::exception& e) {
-            fmt::print("{}\n", e.what());
-            print_usage(av[0]);
-            return client->stop().then([client = std::move(client), rpc = std::move(myrpc)] {
-                engine().exit(1);
-            });
-        }
-
-        return call.then_wrapped([] (future<> f) {
+            future<> call = make_ready_future<>();
             try {
-                f.get();
-            } catch (rpc::timeout_error&) {
-                fmt::print("call timed out\n");
+                call = dispatch_verb(myrpc, *client, verb, args, timeout);
             } catch (std::exception& e) {
-                fmt::print("call failed: {}\n", e.what());
+                fmt::print("{}\n", e.what());
+                print_usage(av[0]);
+                return client->stop().then([] { engine().exit(1); });
             }
-        }).finally([client = std::move(client), rpc = std::move(myrpc)] () mutable {
-            return client->stop().then([client = std::move(client), rpc = std::move(rpc)] { 
+
+            return call.then_wrapped([] (future<> f) {
+                try {
+                    f.get();
+                } catch (rpc::timeout_error&) {
+                    fmt::print("call timed out\n");
+                } catch (std::exception& e) {
+                    fmt::print("call failed: {}\n", e.what());
+                }
+            }).finally([&client] {
+                return client->stop();
+            }).then([] {
                 engine().exit(0);
             });
         });
