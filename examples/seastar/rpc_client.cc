@@ -1,6 +1,7 @@
 #include <iostream>
 #include <seastar/core/app-template.hh>
-#include <seastar/core/do_with.hh>
+#include <seastar/core/coroutine.hh>
+#include <seastar/core/future.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
@@ -9,6 +10,7 @@
 #include "rpc_serializer.hh"
 
 namespace bpo = boost::program_options;
+
 using namespace std::chrono_literals;
 
 namespace {
@@ -39,7 +41,6 @@ void print_usage(const char* prog) {
 future<> dispatch_verb(
         rpc::protocol<serializer>& myrpc, rpc::protocol<serializer>::client& client,
         int verb, const std::vector<std::string>& args, std::chrono::milliseconds timeout);
-
 }
 
 static mycomp mc;
@@ -56,11 +57,11 @@ int main(int ac, char** av) {
         { "args", bpo::value<std::vector<std::string>>(), "Verb-specific arguments", -1 },
     });
 
-    return app.run(ac, av, [&] {
+    return app.run(ac, av, [&] () -> future<int> {
         auto&& config = app.configuration();
         if (!config.count("server") || !config.count("verb")) {
             print_usage(av[0]);
-            return make_ready_future<>().then([] { engine().exit(1); });
+            co_return 1;
         }
 
         bool compress = config["compress"].as<bool>();
@@ -75,38 +76,26 @@ int main(int ac, char** av) {
             co.compressor_factory = &mc;
         }
 
-        return do_with(
-                rpc::protocol<serializer>(serializer{}),
-                std::unique_ptr<rpc::protocol<serializer>::client>(),
-                [&] (auto& myrpc, auto& client) {
-            myrpc.set_logger(&lg);
+        auto myrpc = rpc::protocol<serializer>(serializer{});
+        myrpc.set_logger(&lg);
 
-            client = std::make_unique<rpc::protocol<serializer>::client>(
-                    myrpc, co, ipv4_addr{config["server"].as<std::string>()});
+        auto client = rpc::protocol<serializer>::client(myrpc, co, ipv4_addr{config["server"].as<std::string>()});
 
-            future<> call = make_ready_future<>();
-            try {
-                call = dispatch_verb(myrpc, *client, verb, args, timeout);
-            } catch (std::exception& e) {
-                fmt::print("{}\n", e.what());
-                print_usage(av[0]);
-                return client->stop().then([] { engine().exit(1); });
-            }
+        int rc = 0;
+        try {
+            co_await dispatch_verb(myrpc, client, verb, args, timeout);
+        } catch (rpc::timeout_error&) {
+            fmt::print("call timed out\n");
+        } catch (std::logic_error& e) {  // bad args: invalid_argument, out_of_range
+            fmt::print("{}\n", e.what());
+            print_usage(av[0]);
+            rc = 1;
+        } catch (std::exception& e) {
+            fmt::print("call failed: {}\n", e.what());
+        }
 
-            return call.then_wrapped([] (future<> f) {
-                try {
-                    f.get();
-                } catch (rpc::timeout_error&) {
-                    fmt::print("call timed out\n");
-                } catch (std::exception& e) {
-                    fmt::print("call failed: {}\n", e.what());
-                }
-            }).finally([&client] {
-                return client->stop();
-            }).then([] {
-                engine().exit(0);
-            });
-        });
+        co_await client.stop();
+        co_return rc;
     });
 }
 
@@ -126,7 +115,7 @@ future<> dispatch_verb(
 
     auto need = [&] (size_t n) {
         if (args.size() < n) {
-            throw std::runtime_error(fmt::format("verb {:d} needs at least {:d} argument(s), got {:d}", verb, n, args.size()));
+            throw std::invalid_argument(fmt::format("verb {:d} needs at least {:d} argument(s), got {:d}", verb, n, args.size()));
         }
     };
 
@@ -222,7 +211,7 @@ future<> dispatch_verb(
         });
     }
     default:
-        throw std::runtime_error(fmt::format("unknown verb id: {:d}", verb));
+        throw std::invalid_argument(fmt::format("unknown verb id: {:d}", verb));
     }
 }
 
