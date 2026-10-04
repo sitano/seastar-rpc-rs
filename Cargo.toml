@@ -1,5 +1,5 @@
 [package]
-name = "seastar-rpc-rs"
+name = "seastar-rpc"
 version = "0.1.0"
 edition = "2024"
 description = "Seastar RPC async Rust server/client"
