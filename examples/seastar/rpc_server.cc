@@ -29,7 +29,6 @@
 #include <seastar/core/signal.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
-#include <seastar/util/closeable.hh>
 #include <seastar/util/log.hh>
 
 #include "rpc_serializer.hh"
@@ -70,10 +69,10 @@ int main(int ac, char** av) {
         fmt::print("Seastar RPC server listening on port {} ...\n", port);
 
         auto server = sharded<sharded_rpc_server<serializer>>();
-        auto stop_server = deferred_stop(server);
 
         co_await server.start(serializer{});
 
+        int rc = 0;
         try {
             // Each shard builds its own rpc::protocol: the handler table
             // holds a gate per verb, which is non-copyable.
@@ -84,14 +83,15 @@ int main(int ac, char** av) {
 
                 s.listen(port, so, limits);
             });
+            co_await stop_signal.wait();
         } catch (...) {
             std::cerr << fmt::format("Error: {}\n", seastar::formattable(std::current_exception()));
-            co_return 1;
+            rc = 1;
         }
 
-        co_await stop_signal.wait();
+        co_await server.stop();
 
-        co_return 0;
+        co_return rc;
     });
 }
 
