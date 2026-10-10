@@ -1,13 +1,7 @@
 CARGO ?= cargo
 
-# Build everything with clang: the C++ examples, any C code built by crate build
-# scripts, and the final link of Rust binaries. Override with e.g. `make CC=gcc CXX=g++`.
-CC = clang
+# C++ compiler for the Seastar examples. Override with e.g. `make seastar CXX=g++`.
 CXX = clang++
-export CC CXX
-HOST_TRIPLE := $(shell rustc -vV | sed -n 's/^host: //p')
-CARGO_LINKER_VAR := CARGO_TARGET_$(shell echo '$(HOST_TRIPLE)' | tr 'a-z-' 'A-Z_')_LINKER
-export $(CARGO_LINKER_VAR) := $(CC)
 
 # Interop tests, `bench`, `example` and `dhat` talk to the C++ server from examples/seastar.
 SEASTAR_RPC_ADDR ?= 127.0.0.1:10000
