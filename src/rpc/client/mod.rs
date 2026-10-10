@@ -137,11 +137,55 @@ impl Client {
     }
 
     /// Call `verb` with the default timeout and decode its reply.
+    ///
+    /// ```no_run
+    /// # async fn f() -> seastar_rpc::rpc::Result<()> {
+    /// use seastar_rpc::rpc::{Client, Verb};
+    ///
+    /// /// `int (int, int)`
+    /// const ADD: Verb = 2;
+    ///
+    /// let client = Client::builder().connect("127.0.0.1:10000").await?;
+    /// let sum: i32 = client.call(ADD, (2, 3)).await?;
+    /// assert_eq!(sum, 5);
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Calls are pipelined: start several and await them together to send
+    /// them as a batch over the connection.
+    ///
+    /// ```no_run
+    /// # async fn f(client: seastar_rpc::rpc::Client) -> seastar_rpc::rpc::Result<()> {
+    /// # const ADD: seastar_rpc::rpc::Verb = 2;
+    /// use futures_util::future::try_join_all;
+    ///
+    /// let sums: Vec<i32> = try_join_all((0..10).map(|i| client.call(ADD, (i, 1)))).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn call<Req: Encode, Rep: Decode>(&self, verb: Verb, request: Req) -> Result<Rep> {
         self.call_with(verb, request, CallOptions::default()).await
     }
 
     /// Call `verb` with per-call options and decode its reply.
+    ///
+    /// ```no_run
+    /// # async fn f(client: seastar_rpc::rpc::Client) -> seastar_rpc::rpc::Result<()> {
+    /// use std::time::Duration;
+    /// use seastar_rpc::rpc::{NO_WAIT, Verb, with_timeout};
+    ///
+    /// /// `double (double)`
+    /// const SIN: Verb = 3;
+    /// /// `rpc::no_wait_type ()`
+    /// const NO_WAIT_VERB: Verb = 5;
+    ///
+    /// let y: f64 = client
+    ///     .call_with(SIN, 1.0f64, with_timeout(Duration::from_millis(100)))
+    ///     .await?;
+    ///
+    /// // Fire and forget: returns once the request is queued.
+    /// client.call_with::<_, ()>(NO_WAIT_VERB, (), NO_WAIT).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn call_with<Req: Encode, Rep: Decode>(
         &self,
         verb: Verb,
@@ -158,6 +202,20 @@ impl Client {
     /// The returned future owns what it needs (`'static`), so it can be
     /// boxed or spawned. Dropping it before completion abandons the call: no
     /// cancel is sent (the protocol has none) and a late reply is discarded.
+    ///
+    /// ```no_run
+    /// # async fn f(client: seastar_rpc::rpc::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use seastar_rpc::rpc::codec::serialize::{from_payload, to_payload};
+    /// use seastar_rpc::rpc::{CallOptions, Verb};
+    ///
+    /// /// `sstring (sstring)`
+    /// const ECHO: Verb = 15;
+    ///
+    /// let call = client.call_raw(ECHO, to_payload("hello"), CallOptions::default());
+    /// let reply = tokio::spawn(call).await??;
+    /// let echoed: String = from_payload(reply)?;
+    /// # Ok(()) }
+    /// ```
     pub fn call_raw(
         &self,
         verb: Verb,

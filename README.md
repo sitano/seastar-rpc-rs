@@ -1,5 +1,9 @@
 # seastar-rpc
 
+[![CI](https://github.com/sitano/seastar-rpc-rs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sitano/seastar-rpc-rs/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+
 Seastar RPC async Rust server/client.
 
 Status: early. A tokio client is implemented (negotiation, pipelined
