@@ -1,6 +1,7 @@
 //! Multiplexed client: many concurrent calls over one connection, replies
 //! matched to callers by `msg_id`.
 
+mod batch;
 mod builder;
 mod dispatch;
 
@@ -14,6 +15,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
+pub use batch::{Batch, ManyReplies, Replies};
 pub use builder::ClientBuilder;
 use dispatch::{Outgoing, Request, Shared};
 
@@ -151,8 +153,9 @@ impl Client {
     /// # Ok(()) }
     /// ```
     ///
-    /// Calls are pipelined: start several and await them together to send
-    /// them as a batch over the connection.
+    /// Calls are pipelined: start several and await them together and they
+    /// usually go out in one write. Use [`batch`](Self::batch) or
+    /// [`call_many`](Self::call_many) to guarantee it.
     ///
     /// ```no_run
     /// # async fn f(client: seastar_rpc::rpc::Client) -> seastar_rpc::rpc::Result<()> {
@@ -225,6 +228,74 @@ impl Client {
         self.submit(verb, payload.into(), opts)
     }
 
+    /// Start a batch: requests pushed to it are written back to back, with no
+    /// other call's frame in between, and flushed together (a large batch may
+    /// still take several socket writes). One queue slot, one lock and one
+    /// timer serve the whole batch.
+    ///
+    /// Keep the batch and reuse it: its buffers survive across sends, so once
+    /// warm it allocates nothing per send. Dropped, it returns them to the
+    /// client's pool.
+    ///
+    /// ```no_run
+    /// # async fn f(client: seastar_rpc::rpc::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use seastar_rpc::rpc::codec::serialize::from_payload;
+    /// use seastar_rpc::rpc::{CallOptions, Verb};
+    ///
+    /// /// `int (int, int)`
+    /// const ADD: Verb = 2;
+    /// /// `sstring (sstring)`
+    /// const ECHO: Verb = 15;
+    ///
+    /// let mut batch = client.batch();
+    /// for i in 0..3 {
+    ///     batch.push(ADD, (i, 1));
+    ///     batch.push(ECHO, "hi");
+    ///     let mut replies = batch.send(CallOptions::default()).await?;
+    ///     let sum: i32 = from_payload(replies.next().unwrap()?)?;
+    ///     let echoed: String = from_payload(replies.next().unwrap()?)?;
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn batch(&self) -> Batch {
+        Batch::new(self.inner.clone())
+    }
+
+    /// Call `verb` once per request as one [`batch`](Self::batch), with the
+    /// default timeout. Replies come back in request order, each decoded on
+    /// its own. Uses pooled buffers, so it allocates nothing once warm.
+    ///
+    /// ```no_run
+    /// # async fn f(client: seastar_rpc::rpc::Client) -> seastar_rpc::rpc::Result<()> {
+    /// # const ADD: seastar_rpc::rpc::Verb = 2;
+    /// for sum in client.call_many::<_, i32>(ADD, (0..10).map(|i| (i, 1))).await? {
+    ///     println!("{}", sum?);
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn call_many<Req: Encode, Rep: Decode>(
+        &self,
+        verb: Verb,
+        requests: impl IntoIterator<Item = Req>,
+    ) -> Result<ManyReplies<Rep>> {
+        self.call_many_with(verb, requests, CallOptions::default())
+            .await
+    }
+
+    /// [`call_many`](Self::call_many) with options for the whole batch.
+    pub async fn call_many_with<Req: Encode, Rep: Decode>(
+        &self,
+        verb: Verb,
+        requests: impl IntoIterator<Item = Req>,
+        opts: CallOptions,
+    ) -> Result<ManyReplies<Rep>> {
+        let mut batch = self.batch();
+        for request in requests {
+            batch.push(verb, request);
+        }
+        batch.send_decoded(opts).await
+    }
+
     fn submit(
         &self,
         verb: Verb,
@@ -274,7 +345,9 @@ impl Inner {
         if opts.no_wait_send && opts.no_wait_recv {
             // Fire and forget: nothing will complete a slot, so don't register one.
             self.shared.check_open()?;
-            return self.try_queue(Outgoing::One(request)).map(|()| Bytes::new());
+            return self
+                .try_queue(Outgoing::One(request))
+                .map(|()| Bytes::new());
         }
 
         let msg_id = request.msg_id;
@@ -290,7 +363,10 @@ impl Inner {
         if opts.no_wait_send {
             self.try_queue(Outgoing::One(request))?;
         } else {
-            self.tx.send(Outgoing::One(request)).await.map_err(|_| Error::Closed)?;
+            self.tx
+                .send(Outgoing::One(request))
+                .await
+                .map_err(|_| Error::Closed)?;
         }
 
         std::future::poll_fn(|cx| self.shared.poll_reply(msg_id, cx)).await

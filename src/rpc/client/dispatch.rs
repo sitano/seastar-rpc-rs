@@ -155,7 +155,9 @@ impl Shared {
             return Err(replicate(e));
         }
 
-        state.pending.insert(msg_id, Slot::Waiting(Waiter::One(None)));
+        state
+            .pending
+            .insert(msg_id, Slot::Waiting(Waiter::One(None)));
 
         Ok(())
     }
@@ -457,7 +459,6 @@ pub(super) async fn reader<R: AsyncRead + Unpin>(
 
     shared.close(reason);
 }
-
 
 #[cfg(test)]
 mod tests {
