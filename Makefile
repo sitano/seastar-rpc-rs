@@ -10,7 +10,7 @@ SEASTAR_BUILD := $(SEASTAR_DIR)/build
 
 .DEFAULT_GOAL := help
 .PHONY: help all build release test test-interop bench fmt fmt-check lint check doc \
-	example dhat seastar seastar-server clean clean-seastar ci
+	example examples dhat seastar seastar-server clean clean-seastar ci
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -50,6 +50,9 @@ doc: ## Build the docs
 
 example: ## Run the client example, e.g. make example ARGS="2 3 4"
 	$(CARGO) run --example client -- --server $(SEASTAR_RPC_ADDR) $(ARGS)
+
+examples: ## Run the calls, concurrent and batches examples against the C++ server
+	for e in calls concurrent batches; do $(CARGO) run --release --example $$e -- $(SEASTAR_RPC_ADDR) || exit 1; done
 
 dhat: ## Run the client example with heap profiling (writes dhat-heap.json)
 	RUSTFLAGS="$$RUSTFLAGS --cfg dhat_heap" $(CARGO) run --example client -- --server $(SEASTAR_RPC_ADDR) $(ARGS)
