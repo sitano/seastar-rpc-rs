@@ -17,7 +17,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 const USAGE: &str =
     "usage: client [--server host:port] [--timeout ms] [--count N] [--no-wait-recv] [--no-wait-send] [--no-wait] VERB [args...]
-verbs: add(2) <int> <int> | sin(3) <double> | throw(4) | no_wait(5) | pair(10) | echo(15) <string>
+verbs: add(2) <int> <int> | sin(3) <double> | throw(4) | no_wait(5) | pair(10) | echo(15) <string> | add_quiet(16) <int> <int>
 ";
 
 #[derive(Clone, Copy)]
@@ -29,6 +29,7 @@ enum Verb {
     NoWait = 5,
     Pair = 10,
     Echo = 15,
+    AddQuiet = 16,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -74,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             opts = opts.no_wait_recv();
         }
         let result = match verb {
-            Verb::Add => {
+            Verb::Add | Verb::AddQuiet => {
                 let a = rest.first().ok_or(USAGE)?.parse::<i32>()?;
                 let b = rest.get(1).ok_or(USAGE)?.parse::<i32>()?;
                 client
@@ -129,6 +130,7 @@ impl std::str::FromStr for Verb {
             "no_wait" | "5" => Ok(Verb::NoWait),
             "pair" | "10" => Ok(Verb::Pair),
             "echo" | "15" => Ok(Verb::Echo),
+            "add_quiet" | "16" => Ok(Verb::AddQuiet),
             _ => Err(format!("unknown verb {s:?}\n{USAGE}")),
         }
     }

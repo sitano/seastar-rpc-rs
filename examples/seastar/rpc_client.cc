@@ -34,7 +34,8 @@ void print_usage(const char* prog) {
         "  12 <int sleep_ms> <string>    void\n"
         "  13                            cancellable sleep(1ms)\n"
         "  14 <string>                   void, capped by server's size limit\n"
-        "  15 <string>                   echoes payload back\n",
+        "  15 <string>                   echoes payload back\n"
+        "  16 <int> <int>                returns a+b, server prints nothing\n",
         prog);
 }
 
@@ -53,7 +54,7 @@ int main(int ac, char** av) {
                     ("compress", bpo::value<bool>()->default_value(false), "Compress RPC traffic")
                     ("timeout", bpo::value<uint32_t>()->default_value(5000), "Call timeout in ms");
     app.add_positional_options({
-        { "verb", bpo::value<int>(), "Verb ID to call (1-15)", 1 },
+        { "verb", bpo::value<int>(), "Verb ID to call (1-16)", 1 },
         { "args", bpo::value<std::vector<std::string>>(), "Verb-specific arguments", -1 },
     });
 
@@ -208,6 +209,13 @@ future<> dispatch_verb(
         auto stub = myrpc.make_client<sstring (sstring)>(15);
         return stub(client, timeout, parse<sstring>(args[0])).then([] (sstring r) {
             fmt::print("verb 15 -> {}\n", r);
+        });
+    }
+    case 16: {
+        need(2);
+        auto stub = myrpc.make_client<int (int, int)>(16);
+        return stub(client, timeout, parse<int>(args[0]), parse<int>(args[1])).then([] (int r) {
+            fmt::print("verb 16 -> {:d}\n", r);
         });
     }
     default:

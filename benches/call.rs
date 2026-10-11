@@ -7,8 +7,9 @@
 //! SEASTAR_RPC_ADDR=127.0.0.1:10000 cargo bench --bench call
 //! ```
 //!
-//! Uses verb 2 (`add(int, int) -> int`): fixed-size arguments and reply, so
-//! no per-call allocation on either side beyond the frames themselves.
+//! Uses verb 16 (`add(int, int) -> int`, like verb 2 but the server prints
+//! nothing): fixed-size arguments and reply, so no per-call allocation on
+//! either side beyond the frames themselves, and no stdout on the server.
 
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use futures_util::future::join_all;
 use seastar_rpc::rpc::Client;
 use tokio::runtime::Runtime;
 
-const ADD: u64 = 2;
+const ADD: u64 = 16;
 
 fn runtime() -> Runtime {
     tokio::runtime::Builder::new_current_thread()
