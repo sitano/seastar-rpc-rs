@@ -1,0 +1,299 @@
+//! Explicit request batches: one queue message whose frames are written back
+//! to back, with no other caller's frame in between, and flushed together.
+//!
+//! A `Batch` keeps its buffers across sends and returns them to the client's
+//! pool when dropped, so a warmed-up batch allocates nothing per send.
+
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use bytes::Bytes;
+use tokio::time::Instant;
+
+use super::dispatch::{BatchState, Outgoing, Request, Shared};
+use super::{CallOptions, Inner};
+use crate::rpc::codec::serialize::{Decode, Encode, from_payload};
+use crate::rpc::error::{Error, Result};
+use crate::rpc::verb::Verb;
+
+const LIVE: &str = "batch state is taken only on drop";
+
+/// Requests sent together; see [`Client::batch`](super::Client::batch).
+pub struct Batch {
+    inner: Arc<Inner>,
+    /// `None` only while dropping.
+    state: Option<Arc<BatchState>>,
+    /// Requests pushed since the last send was queued.
+    len: usize,
+    /// Results of the last send. Swapped with the state's list on the next
+    /// one, so both keep their capacity.
+    replies: Vec<Option<Result<Bytes>>>,
+}
+
+impl std::fmt::Debug for Batch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Batch").field("len", &self.len).finish()
+    }
+}
+
+impl Batch {
+    pub(super) fn new(inner: Arc<Inner>) -> Self {
+        let mut state = inner.shared.take_batch_state();
+        let replies = std::mem::take(
+            &mut Arc::get_mut(&mut state)
+                .expect("pooled batch state is unique")
+                .spare,
+        );
+        Batch {
+            inner,
+            state: Some(state),
+            len: 0,
+            replies,
+        }
+    }
+
+    /// Encode `request` for `verb` and append it. Returns its index among the
+    /// replies.
+    pub fn push<Req: Encode>(&mut self, verb: Verb, request: Req) -> usize {
+        let state = self.state_mut();
+        request.encode(&mut state.arena);
+        let payload = state.arena.split().freeze();
+        self.push_payload(verb, payload)
+    }
+
+    /// Append an already-encoded request. Returns its index among the
+    /// replies.
+    pub fn push_raw(&mut self, verb: Verb, payload: impl Into<Bytes>) -> usize {
+        self.push_payload(verb, payload.into())
+    }
+
+    /// Requests pushed and not yet sent.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Drop the requests pushed and not yet sent.
+    pub fn clear(&mut self) {
+        self.state_mut().requests.get_mut().unwrap().clear();
+        self.len = 0;
+    }
+
+    /// Queue the pushed requests and wait for every reply, in push order.
+    ///
+    /// The error means the batch was never queued (connection closed,
+    /// [`Error::QueueFull`] with `no_wait_send`, or the deadline passed while
+    /// waiting for queue room): nothing was sent and the requests stay in the
+    /// batch, so it can be sent again. Once queued, the batch is empty and
+    /// each item has its own result. `opts` apply to the whole batch: on its
+    /// deadline the call returns what has arrived and `Err(Timeout)` for the
+    /// rest. Dropping the future after queueing abandons the outstanding
+    /// items; late replies are discarded.
+    pub async fn send(&mut self, opts: CallOptions) -> Result<Replies<'_>> {
+        self.exchange(opts).await?;
+        Ok(Replies(self.replies.drain(..)))
+    }
+
+    /// [`send`](Self::send), decoding every reply as `Rep`.
+    pub(super) async fn send_decoded<Rep: Decode>(
+        mut self,
+        opts: CallOptions,
+    ) -> Result<ManyReplies<Rep>> {
+        self.exchange(opts).await?;
+        Ok(ManyReplies {
+            batch: self,
+            next: 0,
+            _rep: PhantomData,
+        })
+    }
+
+    fn push_payload(&mut self, verb: Verb, payload: Bytes) -> usize {
+        self.state_mut().requests.get_mut().unwrap().push(Request {
+            msg_id: 0,
+            verb,
+            payload,
+            deadline: None,
+            ack: false,
+        });
+        self.len += 1;
+        self.len - 1
+    }
+
+    fn state_mut(&mut self) -> &mut BatchState {
+        let state = self.state.as_mut().expect(LIVE);
+        if Arc::get_mut(state).is_none() {
+            // The last send was fire-and-forget or abandoned: the writer
+            // still holds that state and pools it when done.
+            *state = self.inner.shared.take_batch_state();
+        }
+        Arc::get_mut(state).expect("pooled batch state is unique")
+    }
+
+    /// Send the pushed requests and leave their results in `replies`.
+    async fn exchange(&mut self, opts: CallOptions) -> Result<()> {
+        let n = self.len;
+        let Batch {
+            inner,
+            state,
+            len,
+            replies,
+        } = self;
+        let state = state.as_mut().expect(LIVE);
+        replies.clear();
+        if n == 0 {
+            return Ok(());
+        }
+
+        let deadline = inner.deadline(&opts);
+        let ack = opts.no_wait_recv && !opts.no_wait_send;
+        let base = inner.next_id.fetch_add(n as i64, Ordering::Relaxed);
+        let unique = "a batch with unsent requests owns its state";
+        let requests = Arc::get_mut(state)
+            .expect(unique)
+            .requests
+            .get_mut()
+            .unwrap();
+        for (r, msg_id) in requests.iter_mut().zip(base..) {
+            r.msg_id = msg_id;
+            r.deadline = deadline;
+            r.ack = ack;
+        }
+
+        if opts.no_wait_send && opts.no_wait_recv {
+            // Fire and forget: nothing will complete a slot, so don't register any.
+            inner.shared.check_open()?;
+            inner.try_queue(Outgoing::Many(state.clone()))?;
+            *len = 0;
+            replies.extend((0..n).map(|_| Some(Ok(Bytes::new()))));
+            return Ok(());
+        }
+
+        Arc::get_mut(state).expect(unique).arm(n);
+        inner.shared.register_many(base, n, state)?;
+
+        // Removes the pending entries if this future is dropped (caller
+        // cancellation) before every reply arrives.
+        let _guard = BatchGuard {
+            shared: &inner.shared,
+            base,
+            n,
+        };
+
+        let exchange = async {
+            let batch = Outgoing::Many(state.clone());
+            if opts.no_wait_send {
+                inner.try_queue(batch)?;
+            } else {
+                inner.tx.send(batch).await.map_err(|_| Error::Closed)?;
+            }
+            // Queued: the requests are the writer's now. Reset before
+            // waiting, so a cancelled send leaves an empty batch.
+            *len = 0;
+            std::future::poll_fn(|cx| state.poll_done(cx)).await;
+            Ok::<(), Error>(())
+        };
+
+        let finished = match before(deadline, exchange).await {
+            Some(r) => {
+                r?;
+                true
+            }
+            // Deadline passed before there was queue room: nothing sent.
+            None if *len != 0 => return Err(Error::Timeout),
+            None => false,
+        };
+
+        // After this, no reply touches the state: it can be reused at once.
+        if finished {
+            inner.shared.fence();
+        } else {
+            inner.shared.forget_many(base, n);
+        }
+        std::mem::swap(&mut *state.results.lock().unwrap(), replies);
+
+        Ok(())
+    }
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        let Some(mut state) = self.state.take() else {
+            return;
+        };
+        if let Some(s) = Arc::get_mut(&mut state) {
+            s.spare = std::mem::take(&mut self.replies);
+        }
+        self.inner.shared.recycle(state);
+    }
+}
+
+/// Replies of a [`Batch::send`], in push order.
+pub struct Replies<'a>(std::vec::Drain<'a, Option<Result<Bytes>>>);
+
+impl Iterator for Replies<'_> {
+    type Item = Result<Bytes>;
+
+    fn next(&mut self) -> Option<Result<Bytes>> {
+        self.0.next().map(reply)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl ExactSizeIterator for Replies<'_> {}
+
+/// Decoded replies of [`Client::call_many`](super::Client::call_many), in
+/// request order. Dropping it returns the batch's buffers to the pool.
+pub struct ManyReplies<Rep> {
+    batch: Batch,
+    next: usize,
+    _rep: PhantomData<fn() -> Rep>,
+}
+
+impl<Rep: Decode> Iterator for ManyReplies<Rep> {
+    type Item = Result<Rep>;
+
+    fn next(&mut self) -> Option<Result<Rep>> {
+        let slot = self.batch.replies.get_mut(self.next)?.take();
+        self.next += 1;
+        Some(reply(slot).and_then(|p| Ok(from_payload(p)?)))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.batch.replies.len() - self.next;
+        (n, Some(n))
+    }
+}
+
+impl<Rep: Decode> ExactSizeIterator for ManyReplies<Rep> {}
+
+/// A result never filled in timed out.
+fn reply(slot: Option<Result<Bytes>>) -> Result<Bytes> {
+    slot.unwrap_or_else(|| Err(Error::Timeout))
+}
+
+/// Run `f` until `deadline`; `None` if the deadline passed first.
+async fn before<F: Future>(deadline: Option<Instant>, f: F) -> Option<F::Output> {
+    match deadline {
+        Some(d) => tokio::time::timeout_at(d, f).await.ok(),
+        None => Some(f.await),
+    }
+}
+
+struct BatchGuard<'a> {
+    shared: &'a Shared,
+    base: i64,
+    n: usize,
+}
+
+impl Drop for BatchGuard<'_> {
+    fn drop(&mut self) {
+        self.shared.forget_many(self.base, self.n);
+    }
+}
