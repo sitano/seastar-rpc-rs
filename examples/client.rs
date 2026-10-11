@@ -4,14 +4,14 @@
 //! cargo run --example client -- [--server host:port] [--timeout ms] [--no-wait-recv] [--no-wait-send] VERB [args...]
 //! cargo run --example client -- 2 3 4        # verb 2 -> 7
 //! cargo run --example client -- --no-wait-recv no_wait   # don't wait for a reply, only the write
-//! cargo run --example client --features dhat-heap -- 2 3 4   # also writes dhat-heap.json
+//! RUSTFLAGS="--cfg dhat_heap" cargo run --example client -- 2 3 4   # also writes dhat-heap.json
 //! ```
 
 use std::time::Duration;
 
 use seastar_rpc::rpc::{Client, with_timeout};
 
-#[cfg(feature = "dhat-heap")]
+#[cfg(dhat_heap)]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
@@ -34,7 +34,7 @@ enum Verb {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Writes dhat-heap.json on drop (view at https://nnethercote.github.io/dh_view/dh_view.html).
-    #[cfg(feature = "dhat-heap")]
+    #[cfg(dhat_heap)]
     let _profiler = dhat::Profiler::new_heap();
 
     let mut server = "127.0.0.1:10000".to_string();

@@ -52,7 +52,7 @@ example: ## Run the client example, e.g. make example ARGS="2 3 4"
 	$(CARGO) run --example client -- --server $(SEASTAR_RPC_ADDR) $(ARGS)
 
 dhat: ## Run the client example with heap profiling (writes dhat-heap.json)
-	$(CARGO) run --example client --features dhat-heap -- --server $(SEASTAR_RPC_ADDR) $(ARGS)
+	RUSTFLAGS="$$RUSTFLAGS --cfg dhat_heap" $(CARGO) run --example client -- --server $(SEASTAR_RPC_ADDR) $(ARGS)
 
 seastar: ## Build the C++ Seastar server and client (see examples/seastar/HACKING.md)
 	cmake -S $(SEASTAR_DIR) -B $(SEASTAR_BUILD) -G Ninja \

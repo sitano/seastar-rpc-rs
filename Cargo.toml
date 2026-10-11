@@ -2,31 +2,31 @@
 name = "seastar-rpc"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Seastar RPC async Rust server/client"
 repository = "https://github.com/sitano/seastar-rpc-rs"
+documentation = "https://docs.rs/seastar-rpc"
 keywords = ["seastar", "scylla", "rpc"]
 categories = ["asynchronous", "network-programming", "database"]
-license = "MIT"
+license = "MIT OR Apache-2.0"
+exclude = [".github/", "Makefile", "examples/seastar/"]
 
 [dependencies]
-bytes = "1.12.1"
-futures-util = { version = "0.3.34", features = ["sink"] }
-thiserror = "2.0.21"
-tokio = { version = "1.53.1", features = ["net", "rt", "sync", "time", "macros", "io-util"] }
-tokio-util = { version = "0.7.19", features = ["codec"] }
-
-[features]
-# Heap profiling for examples: cargo run --example client --features dhat-heap
-dhat-heap = []
-
-[lib]
-path = "src/lib.rs"
+bytes = "1"
+futures-util = { version = "0.3", features = ["sink"] }
+thiserror = "2"
+tokio = { version = "1.38", features = ["net", "rt", "sync", "time", "macros", "io-util"] }
+tokio-util = { version = "0.7", features = ["codec"] }
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.38", features = ["full"] }
 dhat = "0.3"
-criterion = { version = "0.8.2", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 
 [[bench]]
 name = "call"
 harness = false
+
+[lints.rust]
+# Heap profiling for examples: RUSTFLAGS="--cfg dhat_heap" cargo run --example client
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dhat_heap)"] }
