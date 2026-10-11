@@ -104,7 +104,9 @@ impl BatchState {
 
     fn reset(&mut self) {
         self.arena.clear();
-        if self.arena.capacity() > POOL_ARENA_MAX {
+        // `capacity()` only counts what follows the last split; reclaiming
+        // more than the cap succeeds only if the whole buffer is larger.
+        if self.arena.try_reclaim(POOL_ARENA_MAX + 1) {
             self.arena = BytesMut::new();
         }
         shrink(&mut self.spare);
@@ -573,5 +575,20 @@ mod tests {
             .reserve(2 * POOL_ARENA_MAX);
         shared.recycle(state);
         assert!(shared.take_batch_state().arena.capacity() <= POOL_ARENA_MAX);
+    }
+
+    #[test]
+    fn recycle_drops_oversized_arena_after_split() {
+        let shared = Shared::default();
+        let mut state = Arc::new(BatchState::default());
+        let arena = &mut Arc::get_mut(&mut state).unwrap().arena;
+        // A large payload, already written: only the buffer behind it remains.
+        arena.resize(2 * POOL_ARENA_MAX, 0);
+        drop(arena.split().freeze());
+        shared.recycle(state);
+        let mut arena =
+            std::mem::take(&mut Arc::get_mut(&mut shared.take_batch_state()).unwrap().arena);
+        arena.reserve(1);
+        assert!(arena.capacity() <= POOL_ARENA_MAX, "{}", arena.capacity());
     }
 }
