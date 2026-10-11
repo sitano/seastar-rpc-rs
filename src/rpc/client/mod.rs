@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 pub use builder::ClientBuilder;
-use dispatch::{Outgoing, Shared};
+use dispatch::{Outgoing, Request, Shared};
 
 use crate::rpc::codec::negotiation::Features;
 use crate::rpc::codec::serialize::{Decode, Encode, from_payload, to_payload};
@@ -233,12 +233,9 @@ impl Client {
     ) -> impl Future<Output = Result<Bytes>> + Send + 'static {
         let inner = self.inner.clone();
         async move {
-            let deadline = opts
-                .timeout
-                .or(inner.default_timeout)
-                .and_then(|t| Instant::now().checked_add(t));
+            let deadline = inner.deadline(&opts);
 
-            let request = Outgoing {
+            let request = Request {
                 msg_id: inner.next_id.fetch_add(1, Ordering::Relaxed),
                 verb,
                 payload,
@@ -273,11 +270,11 @@ impl Client {
 }
 
 impl Inner {
-    async fn exchange(&self, request: Outgoing, opts: &CallOptions) -> Result<Bytes> {
+    async fn exchange(&self, request: Request, opts: &CallOptions) -> Result<Bytes> {
         if opts.no_wait_send && opts.no_wait_recv {
             // Fire and forget: nothing will complete a slot, so don't register one.
             self.shared.check_open()?;
-            return self.try_queue(request).map(|()| Bytes::new());
+            return self.try_queue(Outgoing::One(request)).map(|()| Bytes::new());
         }
 
         let msg_id = request.msg_id;
@@ -291,12 +288,18 @@ impl Inner {
         };
 
         if opts.no_wait_send {
-            self.try_queue(request)?;
+            self.try_queue(Outgoing::One(request))?;
         } else {
-            self.tx.send(request).await.map_err(|_| Error::Closed)?;
+            self.tx.send(Outgoing::One(request)).await.map_err(|_| Error::Closed)?;
         }
 
         std::future::poll_fn(|cx| self.shared.poll_reply(msg_id, cx)).await
+    }
+
+    fn deadline(&self, opts: &CallOptions) -> Option<Instant> {
+        opts.timeout
+            .or(self.default_timeout)
+            .and_then(|t| Instant::now().checked_add(t))
     }
 
     fn try_queue(&self, request: Outgoing) -> Result<()> {
