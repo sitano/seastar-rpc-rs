@@ -165,3 +165,37 @@ Since this is a wire-format-coupled client, new frame types, features and
 exception types will show up. Mark `Error`, config structs, etc.
 `#[non_exhaustive]` so adding variants isn't a breaking change — standard
 practice in aws-sdk-rust and tonic.
+
+### 8. Explicit batches
+
+Concurrent calls are pipelined and usually share a write, but nothing stops
+another caller's frame from landing between them. `Client::batch` makes the
+grouping explicit: the batch is one message on the writer queue, its frames
+are written back to back and flushed together, and one lock, one queue slot
+and one timer serve all of it.
+
+```rust
+let mut batch = client.batch();          // keep it: buffers are reused
+loop {
+    batch.push(ADD, (1, 2));             // encoded into the batch's arena
+    batch.push_raw(ECHO, payload);
+    for reply in batch.send(CallOptions::default()).await? {
+        let payload: Bytes = reply?;
+    }
+}
+
+for sum in client.call_many::<_, i32>(ADD, (0..10).map(|i| (i, 1))).await? {
+    sum?;
+}
+```
+
+A warm batch allocates nothing per send: payloads share one arena that is
+reclaimed once the frames are written, and request/result lists keep their
+capacity. `call_many` borrows the same buffers from a small per-client pool.
+
+The outer `Result` fails only if the batch was never queued; the requests
+then stay in the batch for a retry. With `no_wait_send` the whole batch is
+queued or rejected with `QueueFull`. Once queued, each item has its own
+result. On the batch deadline, replies already in are kept and the rest are
+`Err(Timeout)`. A batch is not a transaction: the server runs each request
+independently.
