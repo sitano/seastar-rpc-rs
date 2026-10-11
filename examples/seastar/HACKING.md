@@ -106,6 +106,7 @@ The client also takes `--timeout <ms>` (default 5000).
 | 13 | `void ()` | sleeps 1 ms |
 | 14 | `void (sstring)` | rejected once the request exceeds the server's 10 MB `max_memory` |
 | 15 | `sstring (sstring)` | echoes the string back |
+| 16 | `int (int, int)` | returns `a + b` without printing (for benchmarks) |
 
 ## Payload encoding
 

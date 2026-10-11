@@ -144,4 +144,6 @@ static void register_rpc_handlers(rpc::protocol<serializer>& myrpc) {
         fmt::print("test15 echo got {:d} bytes\n", payload.size());
         return payload;
     });
+    // Same as verb 2 but silent, so benchmarks aren't bound by stdout.
+    myrpc.register_handler(16, [](int a, int b){ return make_ready_future<int>(a+b); });
 }
