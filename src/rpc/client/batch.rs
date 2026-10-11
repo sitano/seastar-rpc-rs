@@ -11,13 +11,18 @@ use std::sync::atomic::Ordering;
 use bytes::Bytes;
 use tokio::time::Instant;
 
-use super::dispatch::{BatchState, Outgoing, Request, Shared};
+use super::dispatch::{BatchState, Outgoing, POOL_ARENA_MAX, Request, Shared};
 use super::{CallOptions, Inner};
 use crate::rpc::codec::serialize::{Decode, Encode, from_payload};
 use crate::rpc::error::{Error, Result};
 use crate::rpc::verb::Verb;
 
 const LIVE: &str = "batch state is taken only on drop";
+/// Smallest arena reservation.
+const ARENA_CHUNK: usize = 4096;
+/// Free arena space below which `push` reserves a new chunk rather than let
+/// the encoder grow the arena a few bytes at a time.
+const ARENA_MIN_FREE: usize = 64;
 
 /// Requests sent together; see [`Client::batch`](super::Client::batch).
 pub struct Batch {
@@ -29,6 +34,8 @@ pub struct Batch {
     /// Results of the last send. Swapped with the state's list on the next
     /// one, so both keep their capacity.
     replies: Vec<Option<Result<Bytes>>>,
+    /// Payload bytes pushed since the last send was queued.
+    encoded: usize,
 }
 
 impl std::fmt::Debug for Batch {
@@ -50,15 +57,29 @@ impl Batch {
             state: Some(state),
             len: 0,
             replies,
+            encoded: 0,
         }
     }
 
     /// Encode `request` for `verb` and append it. Returns its index among the
     /// replies.
     pub fn push<Req: Encode>(&mut self, verb: Verb, request: Req) -> usize {
+        let first = self.len == 0;
+        let encoded = self.encoded;
         let state = self.state_mut();
+        // Payloads of a send share the arena, which can only be reclaimed
+        // once they are all gone. So reserve room for a whole send up front,
+        // when the last send's payloads are written and the arena is unique
+        // again: then the send fits without allocating.
+        let want = if first { state.arena_hint } else { 0 };
+        if state.arena.capacity() < want.max(ARENA_MIN_FREE) {
+            state.arena.reserve(state.arena_hint.max(ARENA_CHUNK));
+        }
         request.encode(&mut state.arena);
         let payload = state.arena.split().freeze();
+        let encoded = encoded + payload.len();
+        state.arena_hint = state.arena_hint.max(encoded.min(POOL_ARENA_MAX));
+        self.encoded = encoded;
         self.push_payload(verb, payload)
     }
 
@@ -81,6 +102,7 @@ impl Batch {
     pub fn clear(&mut self) {
         self.state_mut().requests.get_mut().unwrap().clear();
         self.len = 0;
+        self.encoded = 0;
     }
 
     /// Queue the pushed requests and wait for every reply, in push order.
@@ -141,6 +163,7 @@ impl Batch {
             state,
             len,
             replies,
+            encoded,
         } = self;
         let state = state.as_mut().expect(LIVE);
         replies.clear();
@@ -168,6 +191,7 @@ impl Batch {
             inner.shared.check_open()?;
             inner.try_queue(Outgoing::Many(state.clone()))?;
             *len = 0;
+            *encoded = 0;
             replies.extend((0..n).map(|_| Some(Ok(Bytes::new()))));
             return Ok(());
         }
@@ -193,6 +217,7 @@ impl Batch {
             // Queued: the requests are the writer's now. Reset before
             // waiting, so a cancelled send leaves an empty batch.
             *len = 0;
+            *encoded = 0;
             std::future::poll_fn(|cx| state.poll_done(cx)).await;
             Ok::<(), Error>(())
         };

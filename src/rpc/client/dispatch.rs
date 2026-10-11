@@ -33,7 +33,7 @@ const MAX_BATCH: usize = 64;
 /// Most batch states kept for reuse.
 const POOL_MAX: usize = 16;
 /// A pooled state drops an arena larger than this.
-const POOL_ARENA_MAX: usize = 1 << 20;
+pub(super) const POOL_ARENA_MAX: usize = 1 << 20;
 /// A pooled state shrinks request and result lists longer than this.
 const POOL_SLOTS_MAX: usize = 1024;
 
@@ -62,6 +62,9 @@ pub(super) enum Outgoing {
 pub(super) struct BatchState {
     /// Payload arena. Touched only through a unique `Arc`.
     pub arena: BytesMut,
+    /// Most payload bytes one send has pushed, capped at `POOL_ARENA_MAX`:
+    /// the arena room to reserve before a send.
+    pub arena_hint: usize,
     /// Second result list, swapped with `results` after each send. Touched
     /// only through a unique `Arc`.
     pub spare: Vec<Option<Result<Bytes>>>,
