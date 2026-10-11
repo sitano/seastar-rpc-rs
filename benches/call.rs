@@ -49,6 +49,16 @@ async fn add(c: &Client, a: i32, b: i32) {
     assert_eq!(r, a + b);
 }
 
+async fn add_many(c: &Client, depth: i32) {
+    let sums = c
+        .call_many::<(i32, i32), i32>(ADD, (0..depth).map(|i| (i, 1)))
+        .await
+        .unwrap();
+    for (i, sum) in (0..depth).zip(sums) {
+        assert_eq!(sum.unwrap(), i + 1);
+    }
+}
+
 fn bench_add(cr: &mut Criterion) {
     let rt = runtime();
     let Some(client) = connect(&rt) else {
@@ -67,6 +77,9 @@ fn bench_add(cr: &mut Criterion) {
         g.bench_with_input(BenchmarkId::new("pipelined", depth), &depth, |b, &depth| {
             b.to_async(&rt)
                 .iter(|| join_all((0..depth as i32).map(|i| add(&client, i, 1))))
+        });
+        g.bench_with_input(BenchmarkId::new("batch", depth), &depth, |b, &depth| {
+            b.to_async(&rt).iter(|| add_many(&client, depth as i32))
         });
     }
 
