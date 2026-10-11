@@ -1,7 +1,7 @@
 # seastar-rpc
 
 [![CI](https://github.com/sitano/seastar-rpc-rs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sitano/seastar-rpc-rs/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
 Seastar RPC async Rust server/client.
@@ -48,3 +48,9 @@ tests against the C++ server are opt-in:
   client used as the interop reference; see its
   [`HACKING.md`](examples/seastar/HACKING.md) for build steps, the verb
   table and the payload encoding.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this crate by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
