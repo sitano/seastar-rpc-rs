@@ -1,15 +1,17 @@
 # Building the Seastar RPC example
 
 `rpc_server.cc` and `rpc_client.cc` are a small Seastar RPC server and
-client demo, built against a local Seastar checkout via CMake's
-`find_package(Seastar)` support. They share the payload serializer and LZ4
+client demo, built against Seastar via CMake's `find_package(Seastar)`
+support: either an installed Seastar or a local build tree. They share the payload serializer and LZ4
 compressor factory in `rpc_serializer.hh`.
 
 ## Prerequisites
 
-- A built Seastar tree with CMake package files generated (`SeastarConfig.cmake`,
-  `SeastarTargets.cmake` in the build directory). This is produced by
-  Seastar's own `configure.py` / CMake build, e.g.:
+- Seastar, either installed (`SeastarConfig.cmake` under
+  `<prefix>/lib/cmake/Seastar`) or as a built source tree with CMake package
+  files generated (`SeastarConfig.cmake`, `SeastarTargets.cmake` in the build
+  directory). A build tree is produced by Seastar's own `configure.py` /
+  CMake build, e.g.:
 
   ```
   cd ~/Projects/seastar
@@ -22,33 +24,50 @@ compressor factory in `rpc_serializer.hh`.
 
 ## Configuring seastar paths
 
-By default the build looks for Seastar at:
+Seastar is looked up in this order:
 
-- source tree: `~/Projects/seastar`
-- build tree: `~/Projects/seastar/build/debug`
+1. **Explicit build tree.** If `SEASTAR_BUILD_DIR` is set, that tree is
+   used and configuration fails if it is not valid. Set it with an
+   environment variable or a CMake cache variable (the cache variable takes
+   precedence):
 
-Override either with environment variables:
+   ```
+   export SEASTAR_BUILD_DIR=/path/to/seastar/build/dev
+   # or
+   cmake -S . -B build -G Ninja -DSEASTAR_BUILD_DIR=/path/to/seastar/build/dev
+   ```
+
+   A build tree also needs the Seastar source tree's `cmake/` modules.
+   `SEASTAR_SOURCE_DIR` defaults to two levels above the build dir
+   (`<src>/build/<mode>`). Set it too (env or `-D`) for any other layout.
+
+2. **Standard discovery.** `find_package(Seastar)` with CMake's normal
+   search: `Seastar_DIR`, `CMAKE_PREFIX_PATH`, and system install prefixes.
+   Use this for an installed Seastar, e.g.
+   `-DCMAKE_PREFIX_PATH=/opt/seastar`. The user package registry
+   (`~/.cmake/packages`) is skipped on purpose: every Seastar build tree
+   registers itself there, and build trees need the source-tree setup from
+   step 1 or 3.
+
+3. **Local checkout fallback.** `~/Projects/seastar/build/<build type>`,
+   where `<build type>` is the lowercased `CMAKE_BUILD_TYPE` (default
+   `Debug`, so `build/debug`; `-DCMAKE_BUILD_TYPE=Release` uses
+   `build/release`).
+
+Configure prints the Seastar it picked:
 
 ```
-export SEASTAR_SOURCE_DIR=/path/to/seastar
-export SEASTAR_BUILD_DIR=/path/to/seastar/build/dev
+-- Using Seastar from /home/you/Projects/seastar/build/debug
 ```
 
-or with CMake cache variables (takes precedence over the environment):
-
-```
-cmake -S . -B build -G Ninja \
-  -DSEASTAR_SOURCE_DIR=/path/to/seastar \
-  -DSEASTAR_BUILD_DIR=/path/to/seastar/build/dev
-```
-
-`SEASTAR_BUILD_DIR` defaults to `${SEASTAR_SOURCE_DIR}/build/debug` when not
-set explicitly.
+`SEASTAR_SOURCE_DIR` and `SEASTAR_BUILD_DIR` are cached in the build
+directory, so to change them start a fresh build directory or pass the new
+values with `-D`.
 
 ## Build
 
 ```
-cmake -S . -B build -G Ninja
+cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++
 cmake --build build
 ```
 

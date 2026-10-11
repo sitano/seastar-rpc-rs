@@ -10,16 +10,45 @@ Status: early. A tokio client is implemented (negotiation, pipelined
 request/response, typed verbs, no-wait verbs, remote exceptions, `TIMEOUT`).
 LZ4 compression, sink/source streaming and the server side are not yet.
 
-```rust
-use seastar_rpc::rpc::{Client, Verb};
+## Quick start
 
-/// `int (int, int)`
-const ADD: Verb = 2;
+The Rust client talks to the C++ Seastar reference server in
+[`examples/seastar/`](examples/seastar/). Building it needs Seastar, either
+installed or as a local build tree (by default `~/Projects/seastar/build/debug`).
+See [`HACKING.md`](examples/seastar/HACKING.md) for how Seastar is found.
 
-let client = Client::builder().connect("127.0.0.1:10000").await?;
-let sum: i32 = client.call(ADD, (3, 4)).await?;
-assert_eq!(sum, 7);
-```
+1. Build and start the server (listens on `127.0.0.1:10000`):
+
+   ```sh
+   make seastar-server
+   ```
+
+   This configures and builds `examples/seastar/build` with CMake + Ninja
+   and `clang++` (override with `make seastar-server CXX=g++`), then runs
+   `rpc_server`. Use `SEASTAR_RPC_ADDR=host:port` to change the port.
+
+2. In another terminal, call it:
+
+   ```rust
+   use seastar_rpc::rpc::{Client, Verb};
+
+   /// `int (int, int)`
+   const ADD: Verb = 2;
+
+   #[tokio::main(flavor = "current_thread")]
+   async fn main() -> Result<(), Box<dyn std::error::Error>> {
+       let client = Client::builder().connect("127.0.0.1:10000").await?;
+       let sum: i32 = client.call(ADD, (3, 4)).await?;
+       assert_eq!(sum, 7);
+       Ok(())
+   }
+   ```
+
+   Or use the bundled example, which does the same call from the command line:
+
+   ```sh
+   make example ARGS="2 3 4"   # verb 2: 3 + 4 -> 7
+   ```
 
 Layers, each usable on its own:
 
