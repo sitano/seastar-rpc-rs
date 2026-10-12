@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
 use seastar_rpc::rpc::codec::exception::RemoteException;
 use seastar_rpc::rpc::codec::frame::{
@@ -12,7 +12,7 @@ use seastar_rpc::rpc::codec::frame::{
 };
 use seastar_rpc::rpc::codec::negotiation::{Features, read_negotiation, write_negotiation};
 use seastar_rpc::rpc::codec::serialize::{from_payload, to_payload};
-use seastar_rpc::rpc::{Batch, CallOptions, Client, Error, NO_WAIT, Verb, with_timeout};
+use seastar_rpc::rpc::{Batch, CallOptions, Client, Encode, Error, NO_WAIT, Verb, with_timeout};
 use tokio::net::TcpListener;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -484,6 +484,35 @@ async fn batch_replies_in_push_order() {
     let sums: Vec<i32> = replies.map(|r| from_payload(r.unwrap()).unwrap()).collect();
     assert_eq!(sums, [2, 4, 6]);
     assert!(batch.is_empty());
+}
+
+#[tokio::test]
+async fn batch_push_after_encode_panic_sends_clean_payload() {
+    struct Bad;
+    impl Encode for Bad {
+        fn encode(&self, buf: &mut BytesMut) {
+            buf.put_u32_le(0xdead_beef);
+            panic!("encode failed");
+        }
+    }
+    let addr = serve(accepting(false, false), |mut s| async move {
+        let r = s.next().await;
+        assert_eq!(r.payload, to_payload(&(1i32, 2i32)));
+        s.reply(r.msg_id, to_payload(&3i32)).await;
+        let _ = s.requests.next().await;
+    })
+    .await;
+    let client = Client::builder().connect(addr).await.unwrap();
+    let mut batch = client.batch();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        batch.push(ADD, Bad);
+    }));
+    assert!(panicked.is_err());
+    assert!(batch.is_empty());
+    batch.push(ADD, (1i32, 2i32));
+    let mut replies = batch.send(CallOptions::default()).await.unwrap();
+    let sum: i32 = from_payload(replies.next().unwrap().unwrap()).unwrap();
+    assert_eq!(sum, 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
