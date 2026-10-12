@@ -75,6 +75,9 @@ impl Batch {
         if state.arena.capacity() < want.max(ARENA_MIN_FREE) {
             state.arena.reserve(state.arena_hint.max(ARENA_CHUNK));
         }
+        // Drop what an `encode` that panicked part-way left behind, or it
+        // would prefix this payload. Only touches bytes after the last split.
+        state.arena.clear();
         request.encode(&mut state.arena);
         let payload = state.arena.split().freeze();
         let encoded = encoded + payload.len();
