@@ -107,6 +107,7 @@ The client also takes `--timeout <ms>` (default 5000).
 | 14 | `void (sstring)` | rejected once the request exceeds the server's 10 MB `max_memory` |
 | 15 | `sstring (sstring)` | echoes the string back |
 | 16 | `int (int, int)` | returns `a + b` without printing (for benchmarks) |
+| 17 | `int (sum)` | returns `x + y` of a `struct sum { int x, y; }` (see `examples/serde.rs`) |
 
 ## Payload encoding
 
@@ -119,5 +120,6 @@ that apply regardless of serializer):
   length prefix. `int` is `int32_t`, `long` is `int64_t` on Linux.
 - `sstring`: `uint32_t` byte length (host order) followed by the raw bytes,
   no terminator.
+- `sum`: its two `int32_t` fields, back to back.
 - Multiple arguments are concatenated; a trailing `rpc::optional<T>` is
   encoded as nothing when absent; `rpc::tuple` return values are flattened.
