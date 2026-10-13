@@ -44,6 +44,7 @@ See [Features](#features).
 | Streaming | Sink/source streams (`STREAM_PARENT`, stream frames) |
 | Connection management | Reconnect, connection pools, load balancing |
 | TLS | Not built in; bring your own stream through `handshake` |
+| Tower middleware | No `tower::Service` impl for `Client`, so timeout, retry, rate-limit and load-balance layers can't be stacked on calls |
 | Handler duration | Negotiated and parsed, visible on the raw layer only, not exposed by `Client` |
 | Transactional batches | Out of scope: a batch is contiguous on the wire, not all-or-nothing on the server |
 
