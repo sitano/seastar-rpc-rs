@@ -155,13 +155,14 @@ tx.send_request(1, ADD, payload, None).await?;
 ### Runnable examples
 
 [`examples/`](examples/) has programs that run against the C++ server
-(`make seastar-server` first, then `make examples` runs the first three):
+(`make seastar-server` first, then `make examples` runs the first four):
 
 | Example | Shows |
 |---|---|
 | [`calls.rs`](examples/calls.rs) | `call` and `call_with`: scalars, strings, tuples, trailing `Option`, timeouts, no-wait, remote exceptions, unknown verbs, decode errors |
 | [`concurrent.rs`](examples/concurrent.rs) | Sequential loop vs `try_join_all`, overlapping slow calls with `try_join!`, spawned tasks sharing a cloned `Client`, cancellation with `select!` |
 | [`batches.rs`](examples/batches.rs) | A reused `Batch` with mixed verbs, per-item errors, `call_many` in a loop, `call_many_with` with a deadline and no-wait, batches from several tasks |
+| [`serde.rs`](examples/serde.rs) | `Encode` / `Decode` for any serde type through a bincode wrapper, in single calls and `call_many` |
 | [`client.rs`](examples/client.rs) | Command-line client for one verb (`make example ARGS="2 3 4"`) |
 
 ```sh

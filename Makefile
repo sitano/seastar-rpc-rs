@@ -51,8 +51,9 @@ doc: ## Build the docs
 example: ## Run the client example, e.g. make example ARGS="2 3 4"
 	$(CARGO) run --example client -- --server $(SEASTAR_RPC_ADDR) $(ARGS)
 
-examples: ## Run the calls, concurrent and batches examples against the C++ server
+examples: ## Run the calls, concurrent, batches and serde examples against the C++ server
 	for e in calls concurrent batches; do $(CARGO) run --release --example $$e -- $(SEASTAR_RPC_ADDR) || exit 1; done
+	$(CARGO) run --release --example serde -- --server $(SEASTAR_RPC_ADDR)
 
 dhat: ## Run the client example with heap profiling (writes dhat-heap.json)
 	RUSTFLAGS="$$RUSTFLAGS --cfg dhat_heap" $(CARGO) run --example client -- --server $(SEASTAR_RPC_ADDR) $(ARGS)
