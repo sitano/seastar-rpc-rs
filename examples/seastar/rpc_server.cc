@@ -146,4 +146,5 @@ static void register_rpc_handlers(rpc::protocol<serializer>& myrpc) {
     });
     // Same as verb 2 but silent, so benchmarks aren't bound by stdout.
     myrpc.register_handler(16, [](int a, int b){ return make_ready_future<int>(a+b); });
+    myrpc.register_handler(17, [](sum s){ fmt::print("test17 got {{{:d}, {:d}}}\n", s.x, s.y); return s.x + s.y; });
 }
