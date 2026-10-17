@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use seastar_rpc::rpc::codec::serialize::from_payload;
-use seastar_rpc::rpc::{CallOptions, Client, Error, NO_WAIT, Verb, with_timeout};
+use seastar_rpc::rpc::{Client, Error, NO_WAIT, Verb, with_timeout};
 
 /// `int (int, int)`: returns `a + b` without printing on the server.
 const ADD: Verb = 16;
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         batch.push(ADD, (round, 100));
         batch.push(SIN, round as f64);
         batch.push(ECHO, format!("round {round}"));
-        let mut replies = batch.send(CallOptions::default()).await?;
+        let mut replies = batch.send().await?;
         let sum: i32 = from_payload(replies.next().unwrap()?)?;
         let sin: f64 = from_payload(replies.next().unwrap()?)?;
         let echoed: String = from_payload(replies.next().unwrap()?)?;
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     batch.push(THROW, ());
     batch.push(MISSING, ());
     batch.push(ADD, (3, 4));
-    for (i, reply) in batch.send(CallOptions::default()).await?.enumerate() {
+    for (i, reply) in batch.send().await?.enumerate() {
         match reply {
             Ok(payload) if payload.is_empty() => println!("item {i}: ok, no value"),
             Ok(payload) => println!("item {i}: ok, {}", from_payload::<i32>(payload)?),
@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     for i in 0..32 {
                         batch.push(ADD, (t, i));
                     }
-                    for reply in batch.send(CallOptions::default()).await? {
+                    for reply in batch.send().await? {
                         total += from_payload::<i32>(reply?)? as i64;
                     }
                 }

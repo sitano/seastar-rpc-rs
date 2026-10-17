@@ -36,7 +36,7 @@ loop {
     for i in 0..32 {
         batch.push(ADD, (i, 1));          // first = false: no hint-sized reserve
     }
-    for r in batch.send(CallOptions::default()).await? { r?; }
+    for r in batch.send().await? { r?; }
 }
 ```
 

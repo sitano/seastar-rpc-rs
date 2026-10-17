@@ -26,7 +26,7 @@ the capacity of its largest send:
 let mut batch = client.batch();         // kept for the life of the service
 // Once, at startup: a bulk load.
 for row in &rows_100k { batch.push(PUT, row); }   // say 100k items, 64 MiB
-batch.send(CallOptions::default()).await?;
+batch.send().await?;
 // From now on, small sends of ~10 items, but the batch holds
 // ~64 MiB of arena plus three vectors with 100k slots each.
 ```

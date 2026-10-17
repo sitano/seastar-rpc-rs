@@ -9,7 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use seastar_rpc::rpc::codec::frame::{FrameLayout, RequestCodec, ResponseCodec, ResponseFrame};
 use seastar_rpc::rpc::codec::negotiation::{Features, read_negotiation, write_negotiation};
 use seastar_rpc::rpc::codec::serialize::from_payload;
-use seastar_rpc::rpc::{Batch, CallOptions, Client, Verb};
+use seastar_rpc::rpc::{Batch, Client, Verb};
 use tokio::net::TcpListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -54,7 +54,7 @@ async fn reused(batch: &mut Batch) {
     for i in 0..N {
         batch.push(ADD, (i, 1));
     }
-    for r in batch.send(CallOptions::default()).await.unwrap() {
+    for r in batch.send().await.unwrap() {
         assert_eq!(from_payload::<i32>(r.unwrap()).unwrap(), 7);
     }
 }

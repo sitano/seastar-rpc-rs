@@ -130,7 +130,7 @@ client.call_with::<_, ()>(LOG, "hello", CallOptions::default().no_wait()).await?
 let mut batch = client.batch();
 batch.push(ADD, (1, 2));
 batch.push(ADD, (3, 4));
-for reply in batch.send(CallOptions::default()).await? {
+for reply in batch.send().await? {
     let payload = reply?;
 }
 
