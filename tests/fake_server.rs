@@ -12,7 +12,9 @@ use seastar_rpc::rpc::codec::frame::{
 };
 use seastar_rpc::rpc::codec::negotiation::{Features, read_negotiation, write_negotiation};
 use seastar_rpc::rpc::codec::serialize::{from_payload, to_payload};
-use seastar_rpc::rpc::{Batch, CallOptions, Client, Encode, Error, NO_WAIT, Verb, with_timeout};
+use seastar_rpc::rpc::{
+    BATCH_LEAKED_PANIC, Batch, CallOptions, Client, Encode, Error, NO_WAIT, Verb, with_timeout,
+};
 use tokio::net::TcpListener;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -832,6 +834,75 @@ async fn batch_is_reusable() {
     batch.clear();
     assert!(batch.is_empty());
     assert!(sums(&mut batch, CallOptions::default()).await.is_empty());
+}
+
+/// A batch whose send is leaked while waiting for queue room. The leaked
+/// send holds one of the two queue slots for good.
+/// See docs/leaked-send-futures.md.
+async fn leaked_batch(client: &Client) -> Batch {
+    // Fill the queue without yielding (see no_wait_send_fails_on_full_queue).
+    client.call_with::<_, ()>(FIRE, (), NO_WAIT).await.unwrap();
+    client.call_with::<_, ()>(FIRE, (), NO_WAIT).await.unwrap();
+    let mut batch = client.batch();
+    // Negative `a`: the server never answers these, should they ever be sent.
+    batch.push(ADD, (-1, 0));
+    batch.push(ADD, (-2, 0));
+    // One poll registers the pending replies and parks the send on the full
+    // queue, holding a clone of the batch's buffers.
+    let mut send = Box::pin(batch.send(CallOptions::default()));
+    assert!(futures_util::poll!(send.as_mut()).is_pending());
+    // Leak it: its Drop never runs, so the batch still counts 2 requests
+    // while the leaked future keeps them and never sends them. That also
+    // ends the borrow, so the batch can be used again.
+    std::mem::forget(send);
+    batch
+}
+
+/// A client whose queue has room for two messages: the leaked send takes
+/// one for good, the other keeps the client usable.
+async fn leak_client() -> Client {
+    let addr = serve(accepting(false, false), selective_add_server).await;
+    Client::builder()
+        .request_queue(2)
+        .connect(addr)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[should_panic(expected = "leaked send() future (2 request(s))")]
+async fn batch_send_after_leaked_send_panics() {
+    let client = leak_client().await;
+    let mut batch = leaked_batch(&client).await;
+    // No new push: the send itself notices the 2 lost requests and panics,
+    // rather than sending nothing and returning Ok.
+    let _ = batch.send(CallOptions::default()).await;
+}
+
+#[tokio::test]
+async fn batch_is_usable_after_leak_panic() {
+    let client = leak_client().await;
+    let mut batch = leaked_batch(&client).await;
+    // The first use after the leak panics, even a push.
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        batch.push(ADD, (1, 1));
+    }));
+
+    // A caller can tell this panic apart by the message prefix.
+    let payload = panicked.unwrap_err();
+    let msg = payload.downcast_ref::<String>().unwrap();
+
+    assert!(msg.starts_with(BATCH_LEAKED_PANIC), "{msg}");
+    // The batch reset itself before panicking: the lost requests are no
+    // longer counted, and the push that panicked added nothing.
+    assert!(batch.is_empty());
+    // So pushing starts again from index 0, on fresh buffers.
+    assert_eq!(batch.push(ADD, (1, 1)), 0);
+
+    // And the send waits only for that one reply, not the 2 lost ones: with
+    // a stale count it would wait out the deadline instead.
+    let r = sums(&mut batch, with_timeout(Duration::from_secs(5))).await;
+    assert!(matches!(r[..], [Ok(2)]), "{r:?}");
 }
 
 #[tokio::test]

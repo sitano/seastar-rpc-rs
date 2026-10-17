@@ -217,6 +217,8 @@ depths.
   the same, from the server side.
 - [`docs/client-api-examples.md`](docs/client-api-examples.md) — design
   notes for the Rust client API.
+- [`docs/leaked-send-futures.md`](docs/leaked-send-futures.md) — what
+  leaking a send future costs, and why a `Batch` panics afterwards.
 - [`examples/seastar/`](examples/seastar/) — C++ Seastar RPC echo server and
   client used as the interop reference; see its
   [`HACKING.md`](examples/seastar/HACKING.md) for build steps, the verb

@@ -17,14 +17,43 @@ use crate::rpc::codec::serialize::{Decode, Encode, from_payload};
 use crate::rpc::error::{Error, Result};
 use crate::rpc::verb::Verb;
 
-const LIVE: &str = "batch state is taken only on drop";
 /// Smallest arena reservation.
 const ARENA_CHUNK: usize = 4096;
 /// Free arena space below which `push` reserves a new chunk rather than let
 /// the encoder grow the arena a few bytes at a time.
 const ARENA_MIN_FREE: usize = 64;
 
+const LIVE: &str = "batch state is taken only on drop";
+
+/// Start of the panic message after a [leaked send](Batch#leaked-sends), for
+/// telling that panic apart once caught:
+///
+/// ```
+/// # use seastar_rpc::rpc::BATCH_LEAKED_PANIC;
+/// # let payload: Box<dyn std::any::Any + Send> = Box::new(String::new());
+/// let leaked = payload
+///     .downcast_ref::<String>()
+///     .is_some_and(|m| m.starts_with(BATCH_LEAKED_PANIC));
+/// # assert!(!leaked);
+/// ```
+pub const BATCH_LEAKED_PANIC: &str = "Batch lost unsent requests to a leaked send() future";
+
 /// Requests sent together; see [`Client::batch`](super::Client::batch).
+///
+/// # Leaked sends
+///
+/// Dropping a [`send`](Self::send) future is always safe. *Leaking* one
+/// while it waits for queue room (`mem::forget`, an `Rc` cycle, or keeping it
+/// alive without ever polling it again) loses the requests it carries: the
+/// leaked future keeps them and never sends them. It also holds one slot of
+/// the client's request queue for good, as any leaked call does.
+///
+/// The batch doesn't let that pass silently. The next [`push`](Self::push),
+/// [`push_raw`](Self::push_raw), [`clear`](Self::clear) or
+/// [`send`](Self::send) panics, naming how many requests were lost. The
+/// message starts with [`BATCH_LEAKED_PANIC`]. Before
+/// panicking it empties itself and takes fresh buffers, so a caller that
+/// catches the panic can keep using it.
 pub struct Batch {
     inner: Arc<Inner>,
     /// `None` only while dropping.
@@ -63,6 +92,10 @@ impl Batch {
 
     /// Encode `request` for `verb` and append it. Returns its index among the
     /// replies.
+    ///
+    /// # Panics
+    ///
+    /// If `request.encode` panics, or after a [leaked send](Self#leaked-sends).
     pub fn push<Req: Encode>(&mut self, verb: Verb, request: Req) -> usize {
         let first = self.len == 0;
         let encoded = self.encoded;
@@ -88,6 +121,10 @@ impl Batch {
 
     /// Append an already-encoded request. Returns its index among the
     /// replies.
+    ///
+    /// # Panics
+    ///
+    /// After a [leaked send](Self#leaked-sends).
     pub fn push_raw(&mut self, verb: Verb, payload: impl Into<Bytes>) -> usize {
         self.push_payload(verb, payload.into())
     }
@@ -102,8 +139,13 @@ impl Batch {
     }
 
     /// Drop the requests pushed and not yet sent.
+    ///
+    /// # Panics
+    ///
+    /// After a [leaked send](Self#leaked-sends).
     pub fn clear(&mut self) {
         self.state_mut().requests.get_mut().unwrap().clear();
+
         self.len = 0;
         self.encoded = 0;
     }
@@ -118,8 +160,13 @@ impl Batch {
     /// deadline the call returns what has arrived and `Err(Timeout)` for the
     /// rest. Dropping the future after queueing abandons the outstanding
     /// items; late replies are discarded.
+    ///
+    /// # Panics
+    ///
+    /// After a [leaked send](Self#leaked-sends).
     pub async fn send(&mut self, opts: CallOptions) -> Result<Replies<'_>> {
         self.exchange(opts).await?;
+
         Ok(Replies(self.replies.drain(..)))
     }
 
@@ -148,9 +195,17 @@ impl Batch {
         self.len - 1
     }
 
+    /// # Panics
+    ///
+    /// After a [leaked send](Self#leaked-sends), once the batch is reset.
     fn state_mut(&mut self) -> &mut BatchState {
         let state = self.state.as_mut().expect(LIVE);
         if Arc::get_mut(state).is_none() {
+            // Requests still counted mean a send leaked while waiting for
+            // queue room: it holds the state and the requests in it.
+            if self.len != 0 {
+                leaked(&self.inner, state, &mut self.len, &mut self.encoded);
+            }
             // The last send was fire-and-forget or abandoned: the writer
             // still holds that state and pools it when done.
             *state = self.inner.shared.take_batch_state();
@@ -168,8 +223,10 @@ impl Batch {
             replies,
             encoded,
         } = self;
+
         let state = state.as_mut().expect(LIVE);
         replies.clear();
+
         if n == 0 {
             return Ok(());
         }
@@ -177,12 +234,11 @@ impl Batch {
         let deadline = inner.deadline(&opts);
         let ack = opts.no_wait_recv && !opts.no_wait_send;
         let base = inner.next_id.fetch_add(n as i64, Ordering::Relaxed);
-        let unique = "a batch with unsent requests owns its state";
-        let requests = Arc::get_mut(state)
-            .expect(unique)
-            .requests
-            .get_mut()
-            .unwrap();
+        // Unsent requests in a state the batch doesn't own: a send leaked.
+        let Some(owned) = Arc::get_mut(state) else {
+            leaked(inner, state, len, encoded);
+        };
+        let requests = owned.requests.get_mut().unwrap();
         for (r, msg_id) in requests.iter_mut().zip(base..) {
             r.msg_id = msg_id;
             r.deadline = deadline;
@@ -199,6 +255,7 @@ impl Batch {
             return Ok(());
         }
 
+        let unique = "a batch with unsent requests owns its state";
         Arc::get_mut(state).expect(unique).arm(n);
         inner.shared.register_many(base, n, state)?;
 
@@ -304,6 +361,23 @@ impl<Rep: Decode> ExactSizeIterator for ManyReplies<Rep> {}
 /// A result never filled in timed out.
 fn reply(slot: Option<Result<Bytes>>) -> Result<Bytes> {
     slot.unwrap_or_else(|| Err(Error::Timeout))
+}
+
+/// Move a batch whose state a [leaked send](Batch#leaked-sends) kept onto a
+/// fresh one, empty, then panic.
+#[cold]
+#[inline(never)]
+fn leaked(inner: &Inner, state: &mut Arc<BatchState>, len: &mut usize, encoded: &mut usize) -> ! {
+    *state = inner.shared.take_batch_state();
+
+    let lost = std::mem::take(len);
+    *encoded = 0;
+
+    panic!(
+        "{BATCH_LEAKED_PANIC} ({lost} request(s)) while waiting for queue \
+         room; drop send futures instead of leaking them (e.g. with \
+         mem::forget)"
+    );
 }
 
 /// Run `f` until `deadline`; `None` if the deadline passed first.

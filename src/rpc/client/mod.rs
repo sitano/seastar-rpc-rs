@@ -15,7 +15,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-pub use batch::{Batch, ManyReplies, Replies};
+pub use batch::{BATCH_LEAKED_PANIC, Batch, ManyReplies, Replies};
 pub use builder::ClientBuilder;
 use dispatch::{Outgoing, Request, Shared};
 
