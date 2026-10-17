@@ -17,7 +17,8 @@ pub mod raw;
 mod verb;
 
 pub use client::{
-    Batch, CallOptions, Client, ClientBuilder, ManyReplies, NO_WAIT, Replies, with_timeout,
+    BATCH_LEAKED_PANIC, Batch, CallOptions, Client, ClientBuilder, ManyReplies, NO_WAIT, Replies,
+    with_timeout,
 };
 pub use codec::serialize::{Decode, Encode};
 pub use error::{DecodeError, Error, RemoteMessage, Result};
