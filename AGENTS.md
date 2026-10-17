@@ -42,3 +42,7 @@ Things that aren't obvious from one file:
 
 - Never add AI co-author to commits.
 - When you write English, ensure a human can understand what you are saying.
+- We track TODOs in `docs/TODO_*.md` and index them by priority in `docs/TODO_index.md`.
+- When we implement a TODO from the index we remove it. If the result comment are important write a separate doc in `docs/`.
+- When you write code, separate logical blocks by empty lines to be easy to read with an eye.
+- When you write code, comment non-obvious actions in the code for a reader to disambiguate.

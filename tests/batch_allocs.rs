@@ -1,5 +1,5 @@
 //! A warmed-up batch allocates nothing per send: neither a reused `Batch`
-//! nor the pooled `call_many`.
+//! nor the pooled `call_many`. `Batch::shrink` frees an outlier's memory.
 //!
 //! Its own test binary: dhat replaces the global allocator, and its testing
 //! profiler admits one test at a time.
@@ -105,4 +105,18 @@ async fn warm_batches_do_not_allocate_per_send() {
         per_send < 1.0,
         "call_many: {per_send} allocations per send of {N}"
     );
+
+    // One outlier send grows the batch; `shrink` gives the memory back.
+    let mut batch = client.batch();
+    for i in 0..10_000 {
+        batch.push(ADD, (i, 1));
+    }
+
+    batch.send().await.unwrap().for_each(drop);
+
+    let grown = dhat::HeapStats::get().curr_bytes;
+    batch.shrink();
+    let freed = grown - dhat::HeapStats::get().curr_bytes;
+
+    assert!(freed > 100_000, "shrink freed {freed} bytes");
 }

@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use bytes::Bytes;
 use tokio::time::Instant;
 
-use super::dispatch::{BatchState, Outgoing, POOL_ARENA_MAX, Request, Shared};
+use super::dispatch::{BatchState, Outgoing, POOL_ARENA_MAX, Request, Shared, shrink};
 use super::{CallOptions, Inner};
 use crate::rpc::codec::serialize::{Decode, Encode, from_payload};
 use crate::rpc::error::{Error, Result};
@@ -39,6 +39,14 @@ const LIVE: &str = "batch state is taken only on drop";
 pub const BATCH_LEAKED_PANIC: &str = "Batch lost unsent requests to a leaked send() future";
 
 /// Requests sent together; see [`Client::batch`](super::Client::batch).
+///
+/// # Memory
+///
+/// A batch keeps the capacity of its largest send, so a warm batch allocates
+/// nothing per send. A long-lived batch that once sent a large outlier keeps
+/// that memory: call [`shrink`](Self::shrink) after it, or use a separate
+/// batch for bulk loads and drop it. Dropped batches go back to the client's
+/// pool, which applies the same limits.
 ///
 /// # Leaked sends
 ///
@@ -192,6 +200,25 @@ impl Batch {
 
         self.len = 0;
         self.encoded = 0;
+    }
+
+    /// Release memory kept from earlier sends, down to the limits the
+    /// client's pool keeps for idle batches.
+    ///
+    /// A `Batch` keeps the capacity of its largest send so later sends don't
+    /// allocate. After an outlier (say a bulk load of 100k items), call this,
+    /// or drop the batch and take a new one, so a long-lived batch doesn't
+    /// hold that memory for good.
+    ///
+    /// Does nothing while requests are pushed and not sent.
+    pub fn shrink(&mut self) {
+        if self.len != 0 {
+            return;
+        }
+
+        self.state_mut().reset();
+
+        shrink(&mut self.replies);
     }
 
     /// Queue the pushed requests and wait for every reply, in push order.
