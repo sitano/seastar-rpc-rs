@@ -113,7 +113,8 @@ impl BatchState {
         }
     }
 
-    fn reset(&mut self) {
+    /// Apply the pool limits: drop an oversized arena and shrink the lists.
+    pub(super) fn reset(&mut self) {
         self.arena.clear();
 
         // `capacity()` only counts what follows the last split; reclaiming
@@ -128,7 +129,7 @@ impl BatchState {
     }
 }
 
-fn shrink<T>(v: &mut Vec<T>) {
+pub(super) fn shrink<T>(v: &mut Vec<T>) {
     v.clear();
     v.shrink_to(POOL_SLOTS_MAX);
 }
