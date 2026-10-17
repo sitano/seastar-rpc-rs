@@ -81,6 +81,7 @@ impl Batch {
                 .expect("pooled batch state is unique")
                 .spare,
         );
+
         Batch {
             inner,
             state: Some(state),
@@ -96,10 +97,29 @@ impl Batch {
     /// # Panics
     ///
     /// If `request.encode` panics, or after a [leaked send](Self#leaked-sends).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn f(client: seastar_rpc::rpc::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use seastar_rpc::rpc::Verb;
+    ///
+    /// /// `int (int, int)`
+    /// const ADD: Verb = 2;
+    /// /// `sstring (sstring)`
+    /// const ECHO: Verb = 15;
+    ///
+    /// let mut batch = client.batch();
+    /// let sum = batch.push(ADD, (1, 2));
+    /// let echo = batch.push(ECHO, "hi");
+    /// assert_eq!((sum, echo), (0, 1));
+    /// # Ok(()) }
+    /// ```
     pub fn push<Req: Encode>(&mut self, verb: Verb, request: Req) -> usize {
         let first = self.len == 0;
         let encoded = self.encoded;
         let state = self.state_mut();
+
         // Payloads of a send share the arena, which can only be reclaimed
         // once they are all gone. So reserve room for a whole send up front,
         // when the last send's payloads are written and the arena is unique
@@ -108,13 +128,18 @@ impl Batch {
         if state.arena.capacity() < want.max(ARENA_MIN_FREE) {
             state.arena.reserve(state.arena_hint.max(ARENA_CHUNK));
         }
+
         // Drop what an `encode` that panicked part-way left behind, or it
         // would prefix this payload. Only touches bytes after the last split.
         state.arena.clear();
+
         request.encode(&mut state.arena);
+
         let payload = state.arena.split().freeze();
         let encoded = encoded + payload.len();
+
         state.arena_hint = state.arena_hint.max(encoded.min(POOL_ARENA_MAX));
+
         self.encoded = encoded;
         self.push_payload(verb, payload)
     }
@@ -125,6 +150,25 @@ impl Batch {
     /// # Panics
     ///
     /// After a [leaked send](Self#leaked-sends).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn f(client: seastar_rpc::rpc::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use seastar_rpc::rpc::Verb;
+    /// use seastar_rpc::rpc::codec::serialize::to_payload;
+    ///
+    /// /// `sstring (sstring)`
+    /// const ECHO: Verb = 15;
+    ///
+    /// // Encode once, send many times: `Bytes` clones share the buffer.
+    /// let payload = to_payload("hi");
+    /// let mut batch = client.batch();
+    /// for _ in 0..3 {
+    ///     batch.push_raw(ECHO, payload.clone());
+    /// }
+    /// # Ok(()) }
+    /// ```
     pub fn push_raw(&mut self, verb: Verb, payload: impl Into<Bytes>) -> usize {
         self.push_payload(verb, payload.into())
     }
@@ -156,15 +200,71 @@ impl Batch {
     /// [`Error::QueueFull`] with `no_wait_send`, or the deadline passed while
     /// waiting for queue room): nothing was sent and the requests stay in the
     /// batch, so it can be sent again. Once queued, the batch is empty and
-    /// each item has its own result. `opts` apply to the whole batch: on its
-    /// deadline the call returns what has arrived and `Err(Timeout)` for the
-    /// rest. Dropping the future after queueing abandons the outstanding
-    /// items; late replies are discarded.
+    /// each item has its own result. Dropping the future after queueing
+    /// abandons the outstanding items; late replies are discarded.
     ///
     /// # Panics
     ///
     /// After a [leaked send](Self#leaked-sends).
-    pub async fn send(&mut self, opts: CallOptions) -> Result<Replies<'_>> {
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn f(client: seastar_rpc::rpc::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use seastar_rpc::rpc::Verb;
+    /// use seastar_rpc::rpc::codec::serialize::from_payload;
+    ///
+    /// /// `int (int, int)`
+    /// const ADD: Verb = 2;
+    ///
+    /// // Keep the batch across sends: its buffers are reused.
+    /// let mut batch = client.batch();
+    /// for i in 0..3 {
+    ///     batch.push(ADD, (i, 1));
+    ///     batch.push(ADD, (i, 2));
+    ///     for reply in batch.send().await? {
+    ///         let sum: i32 = from_payload(reply?)?;
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn send(&mut self) -> Result<Replies<'_>> {
+        self.send_with(CallOptions::default()).await
+    }
+
+    /// [`send`](Self::send) with `opts` applied to the whole batch: on its
+    /// deadline the call returns what has arrived and `Err(Timeout)` for the
+    /// rest.
+    ///
+    /// # Panics
+    ///
+    /// After a [leaked send](Self#leaked-sends).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn f(client: seastar_rpc::rpc::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::time::Duration;
+    ///
+    /// use seastar_rpc::rpc::{Error, Verb, with_timeout};
+    ///
+    /// /// `int (int, int)`
+    /// const ADD: Verb = 2;
+    ///
+    /// let mut batch = client.batch();
+    /// batch.push(ADD, (1, 2));
+    /// batch.push(ADD, (3, 4));
+    /// for reply in batch.send_with(with_timeout(Duration::from_millis(100))).await? {
+    ///     match reply {
+    ///         Ok(payload) => println!("{} bytes", payload.len()),
+    ///         // This one didn't arrive in time; the others still count.
+    ///         Err(Error::Timeout) => println!("timed out"),
+    ///         Err(e) => return Err(e.into()),
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn send_with(&mut self, opts: CallOptions) -> Result<Replies<'_>> {
         self.exchange(opts).await?;
 
         Ok(Replies(self.replies.drain(..)))
@@ -176,6 +276,7 @@ impl Batch {
         opts: CallOptions,
     ) -> Result<ManyReplies<Rep>> {
         self.exchange(opts).await?;
+
         Ok(ManyReplies {
             batch: self,
             next: 0,
@@ -191,6 +292,7 @@ impl Batch {
             deadline: None,
             ack: false,
         });
+
         self.len += 1;
         self.len - 1
     }
@@ -200,16 +302,19 @@ impl Batch {
     /// After a [leaked send](Self#leaked-sends), once the batch is reset.
     fn state_mut(&mut self) -> &mut BatchState {
         let state = self.state.as_mut().expect(LIVE);
+
         if Arc::get_mut(state).is_none() {
             // Requests still counted mean a send leaked while waiting for
             // queue room: it holds the state and the requests in it.
             if self.len != 0 {
                 leaked(&self.inner, state, &mut self.len, &mut self.encoded);
             }
+
             // The last send was fire-and-forget or abandoned: the writer
             // still holds that state and pools it when done.
             *state = self.inner.shared.take_batch_state();
         }
+
         Arc::get_mut(state).expect("pooled batch state is unique")
     }
 
@@ -234,10 +339,12 @@ impl Batch {
         let deadline = inner.deadline(&opts);
         let ack = opts.no_wait_recv && !opts.no_wait_send;
         let base = inner.next_id.fetch_add(n as i64, Ordering::Relaxed);
+
         // Unsent requests in a state the batch doesn't own: a send leaked.
         let Some(owned) = Arc::get_mut(state) else {
             leaked(inner, state, len, encoded);
         };
+
         let requests = owned.requests.get_mut().unwrap();
         for (r, msg_id) in requests.iter_mut().zip(base..) {
             r.msg_id = msg_id;
@@ -249,9 +356,12 @@ impl Batch {
             // Fire and forget: nothing will complete a slot, so don't register any.
             inner.shared.check_open()?;
             inner.try_queue(Outgoing::Many(state.clone()))?;
+
             *len = 0;
             *encoded = 0;
+
             replies.extend((0..n).map(|_| Some(Ok(Bytes::new()))));
+
             return Ok(());
         }
 
@@ -269,15 +379,18 @@ impl Batch {
 
         let exchange = async {
             let batch = Outgoing::Many(state.clone());
+
             if opts.no_wait_send {
                 inner.try_queue(batch)?;
             } else {
                 inner.tx.send(batch).await.map_err(|_| Error::Closed)?;
             }
+
             // Queued: the requests are the writer's now. Reset before
             // waiting, so a cancelled send leaves an empty batch.
             *len = 0;
             *encoded = 0;
+
             std::future::poll_fn(|cx| state.poll_done(cx)).await;
             Ok::<(), Error>(())
         };
@@ -287,6 +400,7 @@ impl Batch {
                 r?;
                 true
             }
+
             // Deadline passed before there was queue room: nothing sent.
             None if *len != 0 => return Err(Error::Timeout),
             None => false,
@@ -298,6 +412,7 @@ impl Batch {
         } else {
             inner.shared.forget_many(base, n);
         }
+
         std::mem::swap(&mut *state.results.lock().unwrap(), replies);
 
         Ok(())
@@ -309,9 +424,11 @@ impl Drop for Batch {
         let Some(mut state) = self.state.take() else {
             return;
         };
+
         if let Some(s) = Arc::get_mut(&mut state) {
             s.spare = std::mem::take(&mut self.replies);
         }
+
         self.inner.shared.recycle(state);
     }
 }

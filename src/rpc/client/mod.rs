@@ -240,7 +240,7 @@ impl Client {
     /// ```no_run
     /// # async fn f(client: seastar_rpc::rpc::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// use seastar_rpc::rpc::codec::serialize::from_payload;
-    /// use seastar_rpc::rpc::{CallOptions, Verb};
+    /// use seastar_rpc::rpc::Verb;
     ///
     /// /// `int (int, int)`
     /// const ADD: Verb = 2;
@@ -251,7 +251,7 @@ impl Client {
     /// for i in 0..3 {
     ///     batch.push(ADD, (i, 1));
     ///     batch.push(ECHO, "hi");
-    ///     let mut replies = batch.send(CallOptions::default()).await?;
+    ///     let mut replies = batch.send().await?;
     ///     let sum: i32 = from_payload(replies.next().unwrap()?)?;
     ///     let echoed: String = from_payload(replies.next().unwrap()?)?;
     /// }

@@ -179,7 +179,7 @@ let mut batch = client.batch();          // keep it: buffers are reused
 loop {
     batch.push(ADD, (1, 2));             // encoded into the batch's arena
     batch.push_raw(ECHO, payload);
-    for reply in batch.send(CallOptions::default()).await? {
+    for reply in batch.send().await? {
         let payload: Bytes = reply?;
     }
 }

@@ -112,7 +112,9 @@ impl ClientBuilder {
         self.bounded(async {
             let stream = TcpStream::connect(addr).await?;
             stream.set_nodelay(true)?;
+
             let (read, write) = stream.into_split();
+
             self.negotiate(read, write).await
         })
         .await
