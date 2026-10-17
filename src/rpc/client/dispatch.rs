@@ -35,7 +35,7 @@ const POOL_MAX: usize = 16;
 /// A pooled state drops an arena larger than this.
 pub(super) const POOL_ARENA_MAX: usize = 1 << 20;
 /// A pooled state shrinks request and result lists longer than this.
-const POOL_SLOTS_MAX: usize = 1024;
+pub(super) const POOL_SLOTS_MAX: usize = 1024;
 
 /// A request for the writer.
 pub(super) struct Request {
@@ -115,23 +115,35 @@ impl BatchState {
 
     /// Apply the pool limits: drop an oversized arena and shrink the lists.
     pub(super) fn reset(&mut self) {
+        self.shrink_arena(POOL_ARENA_MAX);
+        self.shrink_slots(POOL_SLOTS_MAX);
+    }
+
+    /// Drop the arena if it holds more than `size` bytes, and forget the
+    /// largest send so the next one reserves only what it needs.
+    pub(super) fn shrink_arena(&mut self, size: usize) {
         self.arena.clear();
+        self.arena_hint = 0;
 
         // `capacity()` only counts what follows the last split; reclaiming
-        // more than the cap succeeds only if the whole buffer is larger.
-        if self.arena.try_reclaim(POOL_ARENA_MAX + 1) {
+        // more than `size` succeeds only if the whole buffer is larger.
+        if self.arena.try_reclaim(size.saturating_add(1)) {
             self.arena = BytesMut::new();
         }
+    }
 
-        shrink(&mut self.spare);
-        shrink(self.requests.get_mut().unwrap());
-        shrink(self.results.get_mut().unwrap());
+    /// Empty the request and result lists and shrink them to room for
+    /// `count` requests.
+    pub(super) fn shrink_slots(&mut self, count: usize) {
+        shrink(&mut self.spare, count);
+        shrink(self.requests.get_mut().unwrap(), count);
+        shrink(self.results.get_mut().unwrap(), count);
     }
 }
 
-pub(super) fn shrink<T>(v: &mut Vec<T>) {
+pub(super) fn shrink<T>(v: &mut Vec<T>, count: usize) {
     v.clear();
-    v.shrink_to(POOL_SLOTS_MAX);
+    v.shrink_to(count);
 }
 
 /// Who waits for a slot.
@@ -604,6 +616,29 @@ mod tests {
         shared.recycle(state);
 
         assert!(shared.take_batch_state().arena.capacity() <= POOL_ARENA_MAX);
+    }
+
+    #[test]
+    fn recycle_forgets_arena_hint() {
+        let shared = Shared::default();
+        let mut state = Arc::new(BatchState::default());
+
+        Arc::get_mut(&mut state).unwrap().arena_hint = POOL_ARENA_MAX;
+        shared.recycle(state);
+
+        assert_eq!(shared.take_batch_state().arena_hint, 0);
+    }
+
+    #[test]
+    fn shrink_arena_drops_larger_arena() {
+        let mut state = BatchState::default();
+
+        state.arena.reserve(64 * 1024);
+        state.shrink_arena(64 * 1024);
+        assert!(state.arena.capacity() >= 64 * 1024, "kept within the limit");
+
+        state.shrink_arena(1024);
+        assert_eq!(state.arena.capacity(), 0);
     }
 
     #[test]
