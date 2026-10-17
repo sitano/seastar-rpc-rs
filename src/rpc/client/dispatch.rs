@@ -35,7 +35,7 @@ const POOL_MAX: usize = 16;
 /// A pooled state drops an arena larger than this.
 pub(super) const POOL_ARENA_MAX: usize = 1 << 20;
 /// A pooled state shrinks request and result lists longer than this.
-const POOL_SLOTS_MAX: usize = 1024;
+pub(super) const POOL_SLOTS_MAX: usize = 1024;
 
 /// A request for the writer.
 pub(super) struct Request {
@@ -81,10 +81,19 @@ pub(super) struct BatchState {
 }
 
 impl BatchState {
-    /// Prepare for a send of `n` requests.
+    /// Prepare for a send of `n` requests: set `remaining` to `n` and fill
+    /// `results` with `n` empty entries, one per request, for the reader to
+    /// fill in.
+    ///
+    /// Call it before the slots are registered with
+    /// [`Shared::register_many`]. It takes `&mut self`, so only the owner of
+    /// a unique `Arc` can call it: no writer or reader holds the state at
+    /// that point.
     pub fn arm(&mut self, n: usize) {
         *self.remaining.get_mut() = n;
+
         let results = self.results.get_mut().unwrap();
+
         results.clear();
         results.resize_with(n, || None);
     }
@@ -94,7 +103,9 @@ impl BatchState {
         if self.remaining.load(Ordering::Acquire) == 0 {
             return Poll::Ready(());
         }
+
         self.waker.register(cx.waker());
+
         if self.remaining.load(Ordering::Acquire) == 0 {
             Poll::Ready(())
         } else {
@@ -102,22 +113,37 @@ impl BatchState {
         }
     }
 
-    fn reset(&mut self) {
+    /// Apply the pool limits: drop an oversized arena and shrink the lists.
+    pub(super) fn reset(&mut self) {
+        self.shrink_arena(POOL_ARENA_MAX);
+        self.shrink_slots(POOL_SLOTS_MAX);
+    }
+
+    /// Drop the arena if it holds more than `size` bytes, and forget the
+    /// largest send so the next one reserves only what it needs.
+    pub(super) fn shrink_arena(&mut self, size: usize) {
         self.arena.clear();
+        self.arena_hint = 0;
+
         // `capacity()` only counts what follows the last split; reclaiming
-        // more than the cap succeeds only if the whole buffer is larger.
-        if self.arena.try_reclaim(POOL_ARENA_MAX + 1) {
+        // more than `size` succeeds only if the whole buffer is larger.
+        if self.arena.try_reclaim(size.saturating_add(1)) {
             self.arena = BytesMut::new();
         }
-        shrink(&mut self.spare);
-        shrink(self.requests.get_mut().unwrap());
-        shrink(self.results.get_mut().unwrap());
+    }
+
+    /// Empty the request and result lists and shrink them to room for
+    /// `count` requests.
+    pub(super) fn shrink_slots(&mut self, count: usize) {
+        shrink(&mut self.spare, count);
+        shrink(self.requests.get_mut().unwrap(), count);
+        shrink(self.results.get_mut().unwrap(), count);
     }
 }
 
-fn shrink<T>(v: &mut Vec<T>) {
+pub(super) fn shrink<T>(v: &mut Vec<T>, count: usize) {
     v.clear();
-    v.shrink_to(POOL_SLOTS_MAX);
+    v.shrink_to(count);
 }
 
 /// Who waits for a slot.
@@ -244,8 +270,11 @@ impl Shared {
         let Some(s) = Arc::get_mut(&mut state) else {
             return;
         };
+
         s.reset();
+
         let mut pool = self.pool.lock().unwrap();
+
         if pool.len() < POOL_MAX {
             pool.push(state);
         }
@@ -298,7 +327,9 @@ fn finish(pending: &mut HashMap<i64, Slot>, msg_id: i64, result: Result<Bytes>) 
         let Some(Slot::Waiting(Waiter::Batch(batch, k))) = pending.remove(&msg_id) else {
             unreachable!()
         };
+
         batch.results.lock().unwrap()[k] = Some(result);
+
         // Take the waker and drop our `Arc` before the batch can run, so it
         // finds its state unique again.
         return if batch.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
@@ -314,8 +345,11 @@ fn finish(pending: &mut HashMap<i64, Slot>, msg_id: i64, result: Result<Bytes>) 
     let Slot::Waiting(Waiter::One(waker)) = slot else {
         return None;
     };
+
     let waker = waker.take();
+
     *slot = Slot::Done(result);
+
     waker
 }
 
@@ -513,6 +547,7 @@ mod tests {
     fn forget_many_fences_late_replies() {
         let shared = Shared::default();
         let batch = armed(2);
+
         shared.register_many(1, 2, &batch).unwrap();
         shared.complete(1, Ok(Bytes::from_static(b"x")));
         shared.forget_many(1, 2);
@@ -529,8 +564,10 @@ mod tests {
     fn close_completes_batch_and_rejects_new_ones() {
         let shared = Shared::default();
         let batch = armed(2);
+
         shared.register_many(1, 2, &batch).unwrap();
         shared.close(Error::Closed);
+
         assert!(batch.poll_done(&mut cx()).is_ready());
         assert!(
             batch
@@ -551,6 +588,7 @@ mod tests {
         let shared = Shared::default();
         let state = shared.take_batch_state();
         let held = state.clone();
+
         shared.recycle(state);
         assert_eq!(shared.pool.lock().unwrap().len(), 0);
         shared.recycle(held);
@@ -569,12 +607,38 @@ mod tests {
     fn recycle_drops_oversized_arena() {
         let shared = Shared::default();
         let mut state = Arc::new(BatchState::default());
+
         Arc::get_mut(&mut state)
             .unwrap()
             .arena
             .reserve(2 * POOL_ARENA_MAX);
+
         shared.recycle(state);
+
         assert!(shared.take_batch_state().arena.capacity() <= POOL_ARENA_MAX);
+    }
+
+    #[test]
+    fn recycle_forgets_arena_hint() {
+        let shared = Shared::default();
+        let mut state = Arc::new(BatchState::default());
+
+        Arc::get_mut(&mut state).unwrap().arena_hint = POOL_ARENA_MAX;
+        shared.recycle(state);
+
+        assert_eq!(shared.take_batch_state().arena_hint, 0);
+    }
+
+    #[test]
+    fn shrink_arena_drops_larger_arena() {
+        let mut state = BatchState::default();
+
+        state.arena.reserve(64 * 1024);
+        state.shrink_arena(64 * 1024);
+        assert!(state.arena.capacity() >= 64 * 1024, "kept within the limit");
+
+        state.shrink_arena(1024);
+        assert_eq!(state.arena.capacity(), 0);
     }
 
     #[test]
@@ -582,13 +646,16 @@ mod tests {
         let shared = Shared::default();
         let mut state = Arc::new(BatchState::default());
         let arena = &mut Arc::get_mut(&mut state).unwrap().arena;
+
         // A large payload, already written: only the buffer behind it remains.
         arena.resize(2 * POOL_ARENA_MAX, 0);
         drop(arena.split().freeze());
         shared.recycle(state);
+
         let mut arena =
             std::mem::take(&mut Arc::get_mut(&mut shared.take_batch_state()).unwrap().arena);
         arena.reserve(1);
+
         assert!(arena.capacity() <= POOL_ARENA_MAX, "{}", arena.capacity());
     }
 }

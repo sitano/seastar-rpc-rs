@@ -44,6 +44,7 @@ See [Features](#features).
 | Streaming | Sink/source streams (`STREAM_PARENT`, stream frames) |
 | Connection management | Reconnect, connection pools, load balancing |
 | TLS | Not built in; bring your own stream through `handshake` |
+| Tower middleware | No `tower::Service` impl for `Client`, so timeout, retry, rate-limit and load-balance layers can't be stacked on calls |
 | Handler duration | Negotiated and parsed, visible on the raw layer only, not exposed by `Client` |
 | Transactional batches | Out of scope: a batch is contiguous on the wire, not all-or-nothing on the server |
 
@@ -129,7 +130,7 @@ client.call_with::<_, ()>(LOG, "hello", CallOptions::default().no_wait()).await?
 let mut batch = client.batch();
 batch.push(ADD, (1, 2));
 batch.push(ADD, (3, 4));
-for reply in batch.send(CallOptions::default()).await? {
+for reply in batch.send().await? {
     let payload = reply?;
 }
 
@@ -154,13 +155,14 @@ tx.send_request(1, ADD, payload, None).await?;
 ### Runnable examples
 
 [`examples/`](examples/) has programs that run against the C++ server
-(`make seastar-server` first, then `make examples` runs the first three):
+(`make seastar-server` first, then `make examples` runs the first four):
 
 | Example | Shows |
 |---|---|
 | [`calls.rs`](examples/calls.rs) | `call` and `call_with`: scalars, strings, tuples, trailing `Option`, timeouts, no-wait, remote exceptions, unknown verbs, decode errors |
 | [`concurrent.rs`](examples/concurrent.rs) | Sequential loop vs `try_join_all`, overlapping slow calls with `try_join!`, spawned tasks sharing a cloned `Client`, cancellation with `select!` |
 | [`batches.rs`](examples/batches.rs) | A reused `Batch` with mixed verbs, per-item errors, `call_many` in a loop, `call_many_with` with a deadline and no-wait, batches from several tasks |
+| [`serde.rs`](examples/serde.rs) | `Encode` / `Decode` for any serde type through a bincode wrapper, in single calls and `call_many` |
 | [`client.rs`](examples/client.rs) | Command-line client for one verb (`make example ARGS="2 3 4"`) |
 
 ```sh
@@ -215,6 +217,8 @@ depths.
   the same, from the server side.
 - [`docs/client-api-examples.md`](docs/client-api-examples.md) — design
   notes for the Rust client API.
+- [`docs/leaked-send-futures.md`](docs/leaked-send-futures.md) — what
+  leaking a send future costs, and why a `Batch` panics afterwards.
 - [`examples/seastar/`](examples/seastar/) — C++ Seastar RPC echo server and
   client used as the interop reference; see its
   [`HACKING.md`](examples/seastar/HACKING.md) for build steps, the verb

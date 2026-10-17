@@ -45,9 +45,9 @@ is dropped and the state is later recycled without a spare.
 ```rust
 let mut b = client.batch();               // takes A, replies = A.spare
 b.push(ADD, (1, 2));
-b.send(CallOptions::default().no_wait()).await?;    // A goes to the writer
+b.send_with(CallOptions::default().no_wait()).await?;    // A goes to the writer
 b.push(ADD, (3, 4));                      // A still shared: switch to B
-b.send(CallOptions::default()).await?;
+b.send().await?;
 drop(b);                                  // B.spare = replies; old B.spare dropped
 // The writer recycles A with an empty spare: the next batch on A allocates once.
 ```

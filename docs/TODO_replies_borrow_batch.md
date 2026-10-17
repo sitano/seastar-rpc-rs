@@ -18,7 +18,7 @@ the batch mutably. The whole `Result` carries that borrow, **including the
 This doesn't compile:
 
 ```rust
-let r = batch.send(CallOptions::default().no_wait_send()).await;
+let r = batch.send_with(CallOptions::default().no_wait_send()).await;
 if r.is_err() {
     // error[E0502]: cannot borrow `batch` as immutable because it is also
     // borrowed as mutable
@@ -31,11 +31,11 @@ The same thing came up while implementing the tests
 
 ```rust
 // End the borrow right away.
-let failed = batch.send(opts).await.is_err();
+let failed = batch.send_with(opts).await.is_err();
 if failed { retry_later(&mut batch); }
 
 // Or match and let each arm end the borrow.
-match batch.send(opts).await {
+match batch.send_with(opts).await {
     Ok(replies) => for r in replies { handle(r?); },
     Err(Error::QueueFull) => { /* batch usable again here */ }
     Err(e) => return Err(e),

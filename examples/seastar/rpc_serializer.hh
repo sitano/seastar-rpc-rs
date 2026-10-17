@@ -108,6 +108,20 @@ inline sstring read(serializer, Input& in, rpc::type<sstring>) {
     return ret;
 }
 
+// `sum` as examples/serde.rs sends it with bincode: two int32_t, back to back.
+struct sum {
+    int32_t x;
+    int32_t y;
+};
+
+template <typename Output>
+inline void write(serializer s, Output& out, const sum& v) { write(s, out, v.x); write(s, out, v.y); }
+template <typename Input>
+inline sum read(serializer s, Input& in, rpc::type<sum>) {
+    auto x = read(s, in, rpc::type<int32_t>());
+    return {x, read(s, in, rpc::type<int32_t>())};
+}
+
 class mycomp : public rpc::compressor::factory {
     const sstring _name = "LZ4";
 public:

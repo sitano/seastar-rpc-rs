@@ -1,5 +1,6 @@
 //! A warmed-up batch allocates nothing per send: neither a reused `Batch`
-//! nor the pooled `call_many`.
+//! nor the pooled `call_many`, nor a send that starts with `push_raw`.
+//! `Batch::shrink` frees an outlier's memory.
 //!
 //! Its own test binary: dhat replaces the global allocator, and its testing
 //! profiler admits one test at a time.
@@ -9,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use seastar_rpc::rpc::codec::frame::{FrameLayout, RequestCodec, ResponseCodec, ResponseFrame};
 use seastar_rpc::rpc::codec::negotiation::{Features, read_negotiation, write_negotiation};
 use seastar_rpc::rpc::codec::serialize::from_payload;
-use seastar_rpc::rpc::{Batch, CallOptions, Client, Verb};
+use seastar_rpc::rpc::{Batch, Client, Verb};
 use tokio::net::TcpListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -24,6 +25,10 @@ const ROUNDS: usize = 1000;
 
 /// Reply payload: `7i32`, static so the server allocates nothing either.
 static SEVEN: [u8; 4] = 7i32.to_le_bytes();
+
+/// Encoded per `push` in `raw_first`: big enough that a send outgrows the
+/// arena's first 4 KiB chunk. The server doesn't decode it.
+static BLOB: [u8; 256] = [0; 256];
 
 async fn server() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -54,7 +59,18 @@ async fn reused(batch: &mut Batch) {
     for i in 0..N {
         batch.push(ADD, (i, 1));
     }
-    for r in batch.send(CallOptions::default()).await.unwrap() {
+    for r in batch.send().await.unwrap() {
+        assert_eq!(from_payload::<i32>(r.unwrap()).unwrap(), 7);
+    }
+}
+
+/// A send led by `push_raw`, whose payload doesn't go into the arena.
+async fn raw_first(batch: &mut Batch) {
+    batch.push_raw(ADD, Bytes::from_static(&SEVEN));
+    for _ in 0..N {
+        batch.push(ADD, &BLOB[..]);
+    }
+    for r in batch.send().await.unwrap() {
         assert_eq!(from_payload::<i32>(r.unwrap()).unwrap(), 7);
     }
 }
@@ -93,6 +109,22 @@ async fn warm_batches_do_not_allocate_per_send() {
     );
     drop(batch);
 
+    let mut batch = client.batch();
+    for _ in 0..WARMUP {
+        raw_first(&mut batch).await;
+    }
+    let before = blocks();
+    for _ in 0..ROUNDS {
+        raw_first(&mut batch).await;
+    }
+    let per_send = (blocks() - before) as f64 / ROUNDS as f64;
+    assert!(
+        per_send < 1.0,
+        "push_raw first: {per_send} allocations per send of {}",
+        N + 1
+    );
+    drop(batch);
+
     for _ in 0..WARMUP {
         pooled(&client).await;
     }
@@ -105,4 +137,18 @@ async fn warm_batches_do_not_allocate_per_send() {
         per_send < 1.0,
         "call_many: {per_send} allocations per send of {N}"
     );
+
+    // One outlier send grows the batch; `shrink` gives the memory back.
+    let mut batch = client.batch();
+    for i in 0..10_000 {
+        batch.push(ADD, (i, 1));
+    }
+
+    batch.send().await.unwrap().for_each(drop);
+
+    let grown = dhat::HeapStats::get().curr_bytes;
+    batch.shrink();
+    let freed = grown - dhat::HeapStats::get().curr_bytes;
+
+    assert!(freed > 100_000, "shrink freed {freed} bytes");
 }

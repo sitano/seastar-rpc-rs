@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
 use seastar_rpc::rpc::codec::exception::RemoteException;
 use seastar_rpc::rpc::codec::frame::{
@@ -12,7 +12,9 @@ use seastar_rpc::rpc::codec::frame::{
 };
 use seastar_rpc::rpc::codec::negotiation::{Features, read_negotiation, write_negotiation};
 use seastar_rpc::rpc::codec::serialize::{from_payload, to_payload};
-use seastar_rpc::rpc::{Batch, CallOptions, Client, Error, NO_WAIT, Verb, with_timeout};
+use seastar_rpc::rpc::{
+    BATCH_LEAKED_PANIC, Batch, CallOptions, Client, Encode, Error, NO_WAIT, Verb, with_timeout,
+};
 use tokio::net::TcpListener;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -479,11 +481,40 @@ async fn batch_replies_in_push_order() {
     assert_eq!(batch.push(ADD, (2, 2)), 1);
     assert_eq!(batch.push_raw(ADD, to_payload(&(3i32, 3i32))), 2);
     assert_eq!(batch.len(), 3);
-    let replies = batch.send(CallOptions::default()).await.unwrap();
+    let replies = batch.send().await.unwrap();
     assert_eq!(replies.len(), 3);
     let sums: Vec<i32> = replies.map(|r| from_payload(r.unwrap()).unwrap()).collect();
     assert_eq!(sums, [2, 4, 6]);
     assert!(batch.is_empty());
+}
+
+#[tokio::test]
+async fn batch_push_after_encode_panic_sends_clean_payload() {
+    struct Bad;
+    impl Encode for Bad {
+        fn encode(&self, buf: &mut BytesMut) {
+            buf.put_u32_le(0xdead_beef);
+            panic!("encode failed");
+        }
+    }
+    let addr = serve(accepting(false, false), |mut s| async move {
+        let r = s.next().await;
+        assert_eq!(r.payload, to_payload(&(1i32, 2i32)));
+        s.reply(r.msg_id, to_payload(&3i32)).await;
+        let _ = s.requests.next().await;
+    })
+    .await;
+    let client = Client::builder().connect(addr).await.unwrap();
+    let mut batch = client.batch();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        batch.push(ADD, Bad);
+    }));
+    assert!(panicked.is_err());
+    assert!(batch.is_empty());
+    batch.push(ADD, (1i32, 2i32));
+    let mut replies = batch.send().await.unwrap();
+    let sum: i32 = from_payload(replies.next().unwrap().unwrap()).unwrap();
+    assert_eq!(sum, 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -607,10 +638,13 @@ async fn batch_no_wait_send_queue_full_keeps_requests() {
     let mut batch = client.batch();
     batch.push(OTHER, ());
     batch.push(OTHER, ());
-    assert!(matches!(batch.send(NO_WAIT).await, Err(Error::QueueFull)));
+    assert!(matches!(
+        batch.send_with(NO_WAIT).await,
+        Err(Error::QueueFull)
+    ));
     assert_eq!(batch.len(), 2, "a rejected batch keeps its requests");
     assert!(matches!(
-        batch.send(CallOptions::default().no_wait_send()).await,
+        batch.send_with(CallOptions::default().no_wait_send()).await,
         Err(Error::QueueFull)
     ));
     assert_eq!(batch.len(), 2);
@@ -623,7 +657,7 @@ async fn batch_no_wait_send_queue_full_keeps_requests() {
     assert_eq!(verbs.recv().await, Some(FIRE));
     assert!(verbs.try_recv().is_err(), "a rejected batch was sent");
     // Retrying once there is room sends it.
-    assert_eq!(batch.send(NO_WAIT).await.unwrap().len(), 2);
+    assert_eq!(batch.send_with(NO_WAIT).await.unwrap().len(), 2);
     assert_eq!(verbs.recv().await, Some(OTHER));
     assert_eq!(verbs.recv().await, Some(OTHER));
 }
@@ -637,7 +671,7 @@ async fn batch_no_wait_recv_completes_after_write() {
         batch.push(FIRE, ());
     }
     let replies: Vec<_> = batch
-        .send(CallOptions::default().no_wait_recv())
+        .send_with(CallOptions::default().no_wait_recv())
         .await
         .unwrap()
         .collect();
@@ -728,18 +762,15 @@ async fn batch_dropped_then_late_replies_are_ignored() {
     let mut batch = client.batch();
     batch.push(ADD, (0, 0));
     batch.push(ADD, (0, 0));
-    let abandoned = tokio::time::timeout(
-        Duration::from_millis(20),
-        batch.send(CallOptions::default()),
-    )
-    .await
-    .is_err();
+    let abandoned = tokio::time::timeout(Duration::from_millis(20), batch.send())
+        .await
+        .is_err();
     assert!(abandoned);
     // The batch was queued before it was abandoned: it is empty and reusable.
     assert!(batch.is_empty());
     batch.push(ADD, (2, 3));
     let sums: Vec<i32> = batch
-        .send(CallOptions::default())
+        .send()
         .await
         .unwrap()
         .map(|r| from_payload(r.unwrap()).unwrap())
@@ -763,7 +794,7 @@ async fn selective_add_server(mut s: Server) {
 
 async fn sums(batch: &mut Batch, opts: CallOptions) -> Vec<Result<i32, Error>> {
     batch
-        .send(opts)
+        .send_with(opts)
         .await
         .unwrap()
         .map(|r| r.and_then(|p| Ok(from_payload::<i32>(p)?)))
@@ -790,7 +821,7 @@ async fn batch_is_reusable() {
     // Fire and forget: the writer may still hold this state, so the next
     // push may move to another one.
     batch.push(FIRE, ());
-    let r: Vec<_> = batch.send(NO_WAIT).await.unwrap().collect();
+    let r: Vec<_> = batch.send_with(NO_WAIT).await.unwrap().collect();
     assert!(matches!(r[..], [Ok(_)]), "{r:?}");
 
     batch.push(ADD, (4, 4));
@@ -805,19 +836,80 @@ async fn batch_is_reusable() {
     assert!(sums(&mut batch, CallOptions::default()).await.is_empty());
 }
 
+/// A batch whose send is leaked while waiting for queue room. The leaked
+/// send holds one of the two queue slots for good.
+/// See docs/leaked-send-futures.md.
+async fn leaked_batch(client: &Client) -> Batch {
+    // Fill the queue without yielding (see no_wait_send_fails_on_full_queue).
+    client.call_with::<_, ()>(FIRE, (), NO_WAIT).await.unwrap();
+    client.call_with::<_, ()>(FIRE, (), NO_WAIT).await.unwrap();
+    let mut batch = client.batch();
+    // Negative `a`: the server never answers these, should they ever be sent.
+    batch.push(ADD, (-1, 0));
+    batch.push(ADD, (-2, 0));
+    // One poll registers the pending replies and parks the send on the full
+    // queue, holding a clone of the batch's buffers.
+    let mut send = Box::pin(batch.send());
+    assert!(futures_util::poll!(send.as_mut()).is_pending());
+    // Leak it: its Drop never runs, so the batch still counts 2 requests
+    // while the leaked future keeps them and never sends them. That also
+    // ends the borrow, so the batch can be used again.
+    std::mem::forget(send);
+    batch
+}
+
+/// A client whose queue has room for two messages: the leaked send takes
+/// one for good, the other keeps the client usable.
+async fn leak_client() -> Client {
+    let addr = serve(accepting(false, false), selective_add_server).await;
+    Client::builder()
+        .request_queue(2)
+        .connect(addr)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[should_panic(expected = "leaked send() future (2 request(s))")]
+async fn batch_send_after_leaked_send_panics() {
+    let client = leak_client().await;
+    let mut batch = leaked_batch(&client).await;
+    // No new push: the send itself notices the 2 lost requests and panics,
+    // rather than sending nothing and returning Ok.
+    let _ = batch.send().await;
+}
+
+#[tokio::test]
+async fn batch_is_usable_after_leak_panic() {
+    let client = leak_client().await;
+    let mut batch = leaked_batch(&client).await;
+    // The first use after the leak panics, even a push.
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        batch.push(ADD, (1, 1));
+    }));
+
+    // A caller can tell this panic apart by the message prefix.
+    let payload = panicked.unwrap_err();
+    let msg = payload.downcast_ref::<String>().unwrap();
+
+    assert!(msg.starts_with(BATCH_LEAKED_PANIC), "{msg}");
+    // The batch reset itself before panicking: the lost requests are no
+    // longer counted, and the push that panicked added nothing.
+    assert!(batch.is_empty());
+    // So pushing starts again from index 0, on fresh buffers.
+    assert_eq!(batch.push(ADD, (1, 1)), 0);
+
+    // And the send waits only for that one reply, not the 2 lost ones: with
+    // a stale count it would wait out the deadline instead.
+    let r = sums(&mut batch, with_timeout(Duration::from_secs(5))).await;
+    assert!(matches!(r[..], [Ok(2)]), "{r:?}");
+}
+
 #[tokio::test]
 async fn empty_batch_resolves_immediately() {
     let (addr, mut verbs) = verb_recorder().await;
     let client = Client::builder().connect(addr).await.unwrap();
-    assert_eq!(
-        client
-            .batch()
-            .send(CallOptions::default())
-            .await
-            .unwrap()
-            .len(),
-        0
-    );
+    assert_eq!(client.batch().send().await.unwrap().len(), 0);
     let none: Vec<(i32, i32)> = Vec::new();
     assert_eq!(
         client.call_many::<_, i32>(ADD, none).await.unwrap().len(),
