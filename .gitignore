@@ -21,3 +21,10 @@ build
 /target
 /build
 dhat-heap.json
+
+# repowise owner-digest key (local)
+.repowise/events.key
+/.repowise
+.mcp.json
+/.superpowers
+/.claude
