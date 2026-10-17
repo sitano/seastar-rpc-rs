@@ -11,7 +11,9 @@ use std::sync::atomic::Ordering;
 use bytes::Bytes;
 use tokio::time::Instant;
 
-use super::dispatch::{BatchState, Outgoing, POOL_ARENA_MAX, Request, Shared, shrink};
+use super::dispatch::{
+    BatchState, Outgoing, POOL_ARENA_MAX, POOL_SLOTS_MAX, Request, Shared, shrink,
+};
 use super::{CallOptions, Inner};
 use crate::rpc::codec::serialize::{Decode, Encode, from_payload};
 use crate::rpc::error::{Error, Result};
@@ -210,15 +212,52 @@ impl Batch {
     /// or drop the batch and take a new one, so a long-lived batch doesn't
     /// hold that memory for good.
     ///
-    /// Does nothing while requests are pushed and not sent.
+    /// Does nothing while requests are pushed and not sent. To pick your own
+    /// limits, see [`shrink_arena`](Self::shrink_arena) and
+    /// [`shrink_slots`](Self::shrink_slots).
     pub fn shrink(&mut self) {
+        self.shrink_arena(POOL_ARENA_MAX);
+        self.shrink_slots(POOL_SLOTS_MAX);
+    }
+
+    /// Drop the payload buffer if it holds more than `size` bytes, and stop
+    /// reserving room for the largest earlier send. The next send grows the
+    /// buffer again as it needs.
+    ///
+    /// Does nothing while requests are pushed and not sent.
+    pub fn shrink_arena(&mut self, size: usize) {
         if self.len != 0 {
             return;
         }
 
-        self.state_mut().reset();
+        self.state_mut().shrink_arena(size);
+    }
 
-        shrink(&mut self.replies);
+    /// Reserve `bytes` of payload room at the start of each later send, so a
+    /// send that size encodes without allocating, even right after a
+    /// [`shrink`](Self::shrink) or on a batch fresh from the pool.
+    ///
+    /// The batch raises the hint by itself to its largest send (up to 1 MiB),
+    /// and shrinking resets it to 0.
+    ///
+    /// # Panics
+    ///
+    /// After a [leaked send](Self#leaked-sends).
+    pub fn set_arena_hint(&mut self, bytes: usize) {
+        self.state_mut().arena_hint = bytes;
+    }
+
+    /// Shrink the request and reply lists to room for `count` requests.
+    ///
+    /// Does nothing while requests are pushed and not sent.
+    pub fn shrink_slots(&mut self, count: usize) {
+        if self.len != 0 {
+            return;
+        }
+
+        self.state_mut().shrink_slots(count);
+
+        shrink(&mut self.replies, count);
     }
 
     /// Queue the pushed requests and wait for every reply, in push order.
