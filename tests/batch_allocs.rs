@@ -1,5 +1,6 @@
 //! A warmed-up batch allocates nothing per send: neither a reused `Batch`
-//! nor the pooled `call_many`. `Batch::shrink` frees an outlier's memory.
+//! nor the pooled `call_many`, nor a send that starts with `push_raw`.
+//! `Batch::shrink` frees an outlier's memory.
 //!
 //! Its own test binary: dhat replaces the global allocator, and its testing
 //! profiler admits one test at a time.
@@ -24,6 +25,10 @@ const ROUNDS: usize = 1000;
 
 /// Reply payload: `7i32`, static so the server allocates nothing either.
 static SEVEN: [u8; 4] = 7i32.to_le_bytes();
+
+/// Encoded per `push` in `raw_first`: big enough that a send outgrows the
+/// arena's first 4 KiB chunk. The server doesn't decode it.
+static BLOB: [u8; 256] = [0; 256];
 
 async fn server() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -53,6 +58,17 @@ async fn server() -> std::net::SocketAddr {
 async fn reused(batch: &mut Batch) {
     for i in 0..N {
         batch.push(ADD, (i, 1));
+    }
+    for r in batch.send().await.unwrap() {
+        assert_eq!(from_payload::<i32>(r.unwrap()).unwrap(), 7);
+    }
+}
+
+/// A send led by `push_raw`, whose payload doesn't go into the arena.
+async fn raw_first(batch: &mut Batch) {
+    batch.push_raw(ADD, Bytes::from_static(&SEVEN));
+    for _ in 0..N {
+        batch.push(ADD, &BLOB[..]);
     }
     for r in batch.send().await.unwrap() {
         assert_eq!(from_payload::<i32>(r.unwrap()).unwrap(), 7);
@@ -90,6 +106,22 @@ async fn warm_batches_do_not_allocate_per_send() {
     assert!(
         per_send < 1.0,
         "reused Batch: {per_send} allocations per send of {N}"
+    );
+    drop(batch);
+
+    let mut batch = client.batch();
+    for _ in 0..WARMUP {
+        raw_first(&mut batch).await;
+    }
+    let before = blocks();
+    for _ in 0..ROUNDS {
+        raw_first(&mut batch).await;
+    }
+    let per_send = (blocks() - before) as f64 / ROUNDS as f64;
+    assert!(
+        per_send < 1.0,
+        "push_raw first: {per_send} allocations per send of {}",
+        N + 1
     );
     drop(batch);
 

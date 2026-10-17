@@ -126,7 +126,8 @@ impl Batch {
     /// # Ok(()) }
     /// ```
     pub fn push<Req: Encode>(&mut self, verb: Verb, request: Req) -> usize {
-        let first = self.len == 0;
+        // Not `len`: `push_raw` counts there but leaves the arena unique.
+        let first = self.encoded == 0;
         let encoded = self.encoded;
         let state = self.state_mut();
 
