@@ -65,9 +65,9 @@ pub(super) struct BatchState {
     /// Most payload bytes one send has pushed, capped at `POOL_ARENA_MAX`:
     /// the arena room to reserve before a send.
     pub arena_hint: usize,
-    /// Second result list, swapped with `results` after each send. Touched
-    /// only through a unique `Arc`.
-    pub spare: Vec<Option<Result<Bytes>>>,
+    /// Second result list, swapped with `results` after each send. Locked
+    /// only when a batch hands it back to a state the writer still holds.
+    pub spare: Mutex<Vec<Option<Result<Bytes>>>>,
     /// Requests of the next send. The writer takes them and hands the empty
     /// list back.
     pub requests: Mutex<Vec<Request>>,
@@ -135,7 +135,7 @@ impl BatchState {
     /// Empty the request and result lists and shrink them to room for
     /// `count` requests.
     pub(super) fn shrink_slots(&mut self, count: usize) {
-        shrink(&mut self.spare, count);
+        shrink(self.spare.get_mut().unwrap(), count);
         shrink(self.requests.get_mut().unwrap(), count);
         shrink(self.results.get_mut().unwrap(), count);
     }
