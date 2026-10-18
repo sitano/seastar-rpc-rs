@@ -64,7 +64,7 @@ seastar: ## Build the C++ Seastar server and client (see examples/seastar/HACKIN
 	cmake --build $(SEASTAR_BUILD)
 
 seastar-server: seastar ## Run the C++ Seastar server on the SEASTAR_RPC_ADDR port
-	$(SEASTAR_BUILD)/rpc_server --port $(lastword $(subst :, ,$(SEASTAR_RPC_ADDR)))
+	$(SEASTAR_BUILD)/rpc_server --compress true --port $(lastword $(subst :, ,$(SEASTAR_RPC_ADDR)))
 
 ci: fmt-check lint test doc ## Everything CI should run
 

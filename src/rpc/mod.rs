@@ -20,6 +20,7 @@ pub use client::{
     BATCH_LEAKED_PANIC, Batch, CallOptions, Client, ClientBuilder, ManyReplies, NO_WAIT, Replies,
     with_timeout,
 };
+pub use codec::compress::Compression;
 pub use codec::serialize::{Decode, Encode, from_payload, to_payload};
 pub use error::{DecodeError, Error, RemoteMessage, Result};
 pub use verb::Verb;

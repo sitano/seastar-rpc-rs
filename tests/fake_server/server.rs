@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use seastar_rpc::rpc::Verb;
+use seastar_rpc::rpc::codec::compress::{Compressed, Compression};
 use seastar_rpc::rpc::codec::exception::RemoteException;
 use seastar_rpc::rpc::codec::frame::{
     FrameLayout, RequestCodec, RequestFrame, ResponseCodec, ResponseFrame,
@@ -16,8 +17,8 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 pub struct Server {
-    pub requests: FramedRead<OwnedReadHalf, RequestCodec>,
-    pub responses: FramedWrite<OwnedWriteHalf, ResponseCodec>,
+    pub requests: FramedRead<OwnedReadHalf, Compressed<RequestCodec>>,
+    pub responses: FramedWrite<OwnedWriteHalf, Compressed<ResponseCodec>>,
     /// What the client offered.
     pub offer: Features,
 }
@@ -50,7 +51,8 @@ pub fn accepting(timeout: bool, handler_duration: bool) -> Features {
 }
 
 /// Start a one-connection server that replies to negotiation with `reply`
-/// and then runs `script`.
+/// and then runs `script`. Frames are compressed if `reply` names an
+/// algorithm.
 pub async fn serve<F, Fut>(reply: Features, script: F) -> SocketAddr
 where
     F: FnOnce(Server) -> Fut + Send + 'static,
@@ -64,9 +66,16 @@ where
         let offer = read_negotiation(&mut read).await.unwrap();
         write_negotiation(&mut write, &reply).await.unwrap();
         let layout = FrameLayout::new(&reply, 1 << 20);
+        let compression = reply.compress.as_deref().and_then(Compression::from_name);
         script(Server {
-            requests: FramedRead::new(read, RequestCodec::new(layout)),
-            responses: FramedWrite::new(write, ResponseCodec::new(layout)),
+            requests: FramedRead::new(
+                read,
+                Compressed::new(RequestCodec::new(layout), layout, compression),
+            ),
+            responses: FramedWrite::new(
+                write,
+                Compressed::new(ResponseCodec::new(layout), layout, compression),
+            ),
             offer,
         })
         .await;

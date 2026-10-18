@@ -9,7 +9,7 @@
 //! Needs the C++ reference server from `examples/seastar` (`make seastar-server`).
 //!
 //! ```text
-//! cargo run --release --example raw [-- host:port [count]]
+//! cargo run --release --example raw [-- [--compress lz4|lz4_fragmented] host:port [count]]
 //! ```
 
 use std::time::{Duration, Instant};
@@ -18,12 +18,15 @@ use futures_util::{SinkExt, StreamExt, stream};
 use seastar_rpc::rpc::raw::{RawConnection, RequestFrame};
 use seastar_rpc::rpc::{Client, Error, Verb, from_payload, to_payload};
 
+mod common;
+
 /// `int (int, int)`: returns `a + b`.
 const ADD: Verb = 2;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
+    let (args, compression) = common::args()?;
+    let mut args = args.into_iter();
     let addr = args.next().unwrap_or_else(|| "127.0.0.1:10000".into());
     let count: i32 = args.next().map_or(Ok(100_000), |s| s.parse())?;
 
@@ -33,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         features,
         ..
     } = Client::builder()
+        .offer_compression(compression)
         .connect_timeout(Duration::from_secs(3))
         .connect_raw(&addr)
         .await?;

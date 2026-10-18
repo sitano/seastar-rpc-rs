@@ -24,6 +24,8 @@
 #include <seastar/core/print.hh>
 #include <seastar/rpc/rpc.hh>
 #include <seastar/rpc/lz4_compressor.hh>
+#include <seastar/rpc/lz4_fragmented_compressor.hh>
+#include <seastar/rpc/multi_algo_compressor_factory.hh>
 
 using namespace seastar;
 
@@ -122,15 +124,11 @@ inline sum read(serializer s, Input& in, rpc::type<sum>) {
     return {x, read(s, in, rpc::type<int32_t>())};
 }
 
-class mycomp : public rpc::compressor::factory {
-    const sstring _name = "LZ4";
-public:
-    virtual const sstring& supported() const override {
-        fmt::print("supported called\n");
-        return _name;
-    }
-    virtual std::unique_ptr<rpc::compressor> negotiate(sstring feature, bool is_server) const override {
-        fmt::print("negotiate called with {}\n", feature);
-        return feature == _name ? std::make_unique<rpc::lz4_compressor>() : nullptr;
-    }
-};
+// Both built-in algorithms. A client offers them as "LZ4_FRAGMENTED,LZ4";
+// a server picks the first one, in the client's order, that it supports.
+inline rpc::compressor::factory* compressor_factory() {
+    static const rpc::lz4_fragmented_compressor::factory lz4_fragmented;
+    static const rpc::lz4_compressor::factory lz4;
+    static rpc::multi_algo_compressor_factory factory{&lz4_fragmented, &lz4};
+    return &factory;
+}

@@ -3,5 +3,6 @@
 
 mod batch;
 mod calls;
+mod compression;
 mod connection;
 mod server;

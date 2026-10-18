@@ -1,6 +1,6 @@
 [package]
 name = "seastar-rpc"
-version = "0.2.0"
+version = "0.2.1-rc.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Seastar RPC async Rust server/client"
@@ -14,6 +14,7 @@ exclude = [".github/", "Makefile", "docs/TODO_*", "AGENTS.md", "CLAUDE.md", ".cl
 [dependencies]
 bytes = "1"
 futures-util = { version = "0.3", features = ["sink"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-decode"] }
 thiserror = "2"
 tokio = { version = "1.38", features = ["net", "rt", "sync", "time", "macros", "io-util"] }
 tokio-util = { version = "0.7", features = ["codec"] }

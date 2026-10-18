@@ -2,13 +2,15 @@
 //! nor the pooled `call_many`, small or larger than the arena's first 4 KiB
 //! chunk, nor a send that starts with `push_raw`.
 //! `Batch::shrink` frees an outlier's memory, and the pool drops an outlier
-//! `call_many`'s arena.
+//! `call_many`'s arena. Compressed connections allocate nothing per send
+//! either.
 //!
 //! Its own test binary: dhat replaces the global allocator, and its testing
 //! profiler admits one test at a time.
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
+use seastar_rpc::rpc::codec::compress::{Compressed, Compression};
 use seastar_rpc::rpc::codec::frame::{FrameLayout, RequestCodec, ResponseCodec, ResponseFrame};
 use seastar_rpc::rpc::codec::negotiation::{Features, read_negotiation, write_negotiation};
 use seastar_rpc::rpc::codec::serialize::{from_payload, to_payload};
@@ -32,7 +34,7 @@ static SEVEN: [u8; 4] = 7i32.to_le_bytes();
 /// send outgrows the arena's first 4 KiB chunk. The server doesn't decode it.
 static BLOB: [u8; 256] = [0; 256];
 
-async fn server() -> std::net::SocketAddr {
+async fn server(compression: Option<Compression>) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -40,11 +42,14 @@ async fn server() -> std::net::SocketAddr {
         stream.set_nodelay(true).unwrap();
         let (mut read, mut write) = stream.into_split();
         read_negotiation(&mut read).await.unwrap();
-        let features = Features::default();
+        let mut features = Features::default();
+        features.compress = compression.map(|c| Bytes::from_static(c.name().as_bytes()));
         write_negotiation(&mut write, &features).await.unwrap();
         let layout = FrameLayout::new(&features, 4 << 20);
-        let mut requests = FramedRead::new(read, RequestCodec::new(layout));
-        let mut responses = FramedWrite::new(write, ResponseCodec::new(layout));
+        let requests = Compressed::new(RequestCodec::new(layout), layout, compression);
+        let responses = Compressed::new(ResponseCodec::new(layout), layout, compression);
+        let mut requests = FramedRead::new(read, requests);
+        let mut responses = FramedWrite::new(write, responses);
         while let Some(Ok(r)) = requests.next().await {
             let frame = ResponseFrame {
                 msg_id: r.msg_id,
@@ -105,7 +110,7 @@ fn blocks() -> u64 {
 #[tokio::test]
 async fn warm_batches_do_not_allocate_per_send() {
     let _profiler = dhat::Profiler::builder().testing().build();
-    let client = Client::builder().connect(server().await).await.unwrap();
+    let client = Client::builder().connect(server(None).await).await.unwrap();
 
     let mut batch = client.batch();
     for _ in 0..WARMUP {
@@ -198,4 +203,42 @@ async fn warm_batches_do_not_allocate_per_send() {
     let kept = dhat::HeapStats::get().curr_bytes.saturating_sub(before);
 
     assert!(kept < 1 << 20, "pooled call_many state kept {kept} bytes");
+
+    // Compression keeps its buffers and hash table between frames.
+    for algo in [Compression::Lz4, Compression::Lz4Fragmented] {
+        let client = Client::builder()
+            .offer_compression([algo])
+            .connect(server(Some(algo)).await)
+            .await
+            .unwrap();
+
+        let mut batch = client.batch();
+        for _ in 0..WARMUP {
+            raw_first(&mut batch).await;
+        }
+        let before = blocks();
+        for _ in 0..ROUNDS {
+            raw_first(&mut batch).await;
+        }
+        let per_send = (blocks() - before) as f64 / ROUNDS as f64;
+        assert!(
+            per_send < 1.0,
+            "{algo:?} Batch: {per_send} allocations per send of {}",
+            N + 1
+        );
+        drop(batch);
+
+        for _ in 0..WARMUP {
+            pooled(&client).await;
+        }
+        let before = blocks();
+        for _ in 0..ROUNDS {
+            pooled(&client).await;
+        }
+        let per_send = (blocks() - before) as f64 / ROUNDS as f64;
+        assert!(
+            per_send < 1.0,
+            "{algo:?} call_many: {per_send} allocations per send of {N}"
+        );
+    }
 }

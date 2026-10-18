@@ -6,6 +6,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
 use crate::rpc::client::Client;
+use crate::rpc::codec::compress::Compression;
 use crate::rpc::codec::frame::FrameLayout;
 use crate::rpc::codec::negotiation::{Features, read_negotiation, write_negotiation};
 use crate::rpc::error::{Error, Result};
@@ -32,6 +33,7 @@ pub struct ClientBuilder {
     offer_timeout: bool,
     offer_handler_duration: bool,
     isolation_cookie: Option<Bytes>,
+    compression: Vec<Compression>,
 }
 
 impl Default for ClientBuilder {
@@ -44,6 +46,7 @@ impl Default for ClientBuilder {
             offer_timeout: true,
             offer_handler_duration: true,
             isolation_cookie: None,
+            compression: Vec::new(),
         }
     }
 }
@@ -98,6 +101,15 @@ impl ClientBuilder {
         self
     }
 
+    /// Offer `COMPRESS` with these algorithms, most preferred first (default
+    /// none). They are sent as a comma-separated list, e.g.
+    /// `"LZ4,LZ4_FRAGMENTED"`, which Seastar's `multi_algo_compressor_factory`
+    /// picks from; the server's choice then applies to every frame.
+    pub fn offer_compression(mut self, algos: impl IntoIterator<Item = Compression>) -> Self {
+        self.compression = algos.into_iter().collect();
+        self
+    }
+
     /// Connect over TCP and start a multiplexed [`Client`].
     pub async fn connect(self, addr: impl ToSocketAddrs) -> Result<Client> {
         let raw = self.clone().connect_raw(addr).await?;
@@ -146,6 +158,10 @@ impl ClientBuilder {
             timeout: self.offer_timeout,
             handler_duration: self.offer_handler_duration,
             isolation: self.isolation_cookie.clone(),
+            compress: (!self.compression.is_empty()).then(|| {
+                let names: Vec<&str> = self.compression.iter().map(|c| c.name()).collect();
+                Bytes::from(names.join(","))
+            }),
             ..Features::default()
         }
     }
@@ -157,18 +173,26 @@ impl ClientBuilder {
     {
         write_negotiation(&mut write, &self.offer()).await?;
         let features = read_negotiation(&mut read).await?;
-        // The server's reply decides the frame layout. Compression and
-        // streaming are not implemented, so accepting them would desync us.
-        if features.compress.is_some() {
-            return Err(Error::Protocol(
-                "server enabled COMPRESS, which was not offered".into(),
-            ));
-        }
+        // The server's reply decides the frame layout and compression. An
+        // algorithm we didn't offer would desync us.
+        let compression = match &features.compress {
+            None => None,
+            Some(name) => Some(
+                Compression::from_name(name)
+                    .filter(|c| self.compression.contains(c))
+                    .ok_or_else(|| {
+                        Error::Protocol(format!(
+                            "server chose compression {:?}, which was not offered",
+                            String::from_utf8_lossy(name)
+                        ))
+                    })?,
+            ),
+        };
 
         let layout = FrameLayout::new(&features, self.max_frame_size);
         Ok(RawConnection {
-            sender: RawSender::new(write, layout),
-            receiver: RawReceiver::new(read, layout),
+            sender: RawSender::new(write, layout, compression),
+            receiver: RawReceiver::new(read, layout, compression),
             features,
         })
     }
