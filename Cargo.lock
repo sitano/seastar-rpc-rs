@@ -383,6 +383,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -622,13 +628,14 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seastar-rpc"
-version = "0.2.0"
+version = "0.2.1-rc.1"
 dependencies = [
  "bincode",
  "bytes",
  "criterion",
  "dhat",
  "futures-util",
+ "lz4_flex",
  "serde",
  "thiserror",
  "tokio",

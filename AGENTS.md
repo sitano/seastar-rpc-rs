@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rust (edition 2024, MSRV 1.85) client/server for the C++ Seastar RPC wire protocol, crate `seastar-rpc`. Only the client side exists; server, compression and streaming are not implemented yet (see README "Not supported yet"). Repowise tooling notes live in `.claude/CLAUDE.md`.
+Rust (edition 2024, MSRV 1.85) client/server for the C++ Seastar RPC wire protocol, crate `seastar-rpc`. Only the client side exists; server and streaming are not implemented yet (see README "Not supported yet"). Repowise tooling notes live in `.claude/CLAUDE.md`.
 
 ## Commands
 
@@ -24,7 +24,7 @@ Needs the C++ reference server (`make seastar-server`, listens on `127.0.0.1:100
 
 Three layers under `src/rpc/`, each usable on its own:
 
-- `codec/` — role-agnostic wire format: every codec both encodes and decodes, so the same code serves a client and (future) server. `negotiation.rs` (`SSTARRPC` handshake, `Features`), `frame.rs` (request/response frames; header layout depends on negotiated features, captured once in `FrameLayout`), `exception.rs` (negative `msg_id` responses), `serialize.rs` (`Encode`/`Decode`). Module docs cite sections of `docs/rpc-wire-protocol-client-guide.md` ("wire guide §N").
+- `codec/` — role-agnostic wire format: every codec both encodes and decodes, so the same code serves a client and (future) server. `negotiation.rs` (`SSTARRPC` handshake, `Features`), `frame.rs` (request/response frames; header layout depends on negotiated features, captured once in `FrameLayout`), `compress.rs` (`COMPRESS` envelope, LZ4 / LZ4_FRAGMENTED; `Compressed<C>` wraps a frame codec and passes through when off), `exception.rs` (negative `msg_id` responses), `serialize.rs` (`Encode`/`Decode`). Module docs cite sections of `docs/rpc-wire-protocol-client-guide.md` ("wire guide §N").
 - `raw.rs` — a negotiated connection as `RawSender` (`Sink<RequestFrame>`, caller picks `msg_id`) and `RawReceiver` (`Stream` of every response). No pending-call table.
 - `client/` — `Client` multiplexes calls over one raw connection. `dispatch.rs` runs separate writer and reader tasks (one task blocking on a write could deadlock against a peer blocked writing replies). Callers register a slot in a shared pending map before queueing; the reader completes it by `msg_id`. Slots hold the caller's waker, so a call allocates nothing per request. `batch.rs`: a `Batch` is one queue message whose frames are written contiguously and flushed together; its buffers are pooled and reused so a warm batch allocates nothing per send — `tests/batch_allocs.rs` asserts this with dhat (own binary because dhat replaces the global allocator).
 
@@ -47,3 +47,4 @@ Things that aren't obvious from one file:
 - When we implement a TODO from the index we remove it. If the result comment are important write a separate doc in `docs/`.
 - When you write code, separate logical blocks by empty lines to be easy to read with an eye.
 - When you write code, comment non-obvious actions in the code for a reader to disambiguate.
+- When you write code, try minimize allocations to zero on hot-paths.
