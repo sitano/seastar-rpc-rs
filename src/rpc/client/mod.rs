@@ -119,7 +119,12 @@ impl Client {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let (sender, receiver, features) = raw.into_parts();
+        let RawConnection {
+            sender,
+            receiver,
+            features,
+            ..
+        } = raw;
         let (tx, rx) = mpsc::channel(queue);
         let (stop_tx, stop_rx) = oneshot::channel();
         let shared = Arc::new(Shared::default());

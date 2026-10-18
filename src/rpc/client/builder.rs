@@ -105,6 +105,8 @@ impl ClientBuilder {
     }
 
     /// Connect over TCP and return the raw halves, without a dispatcher.
+    /// `request_queue` and `default_timeout` only apply to a [`Client`] and
+    /// are ignored here.
     pub async fn connect_raw(
         self,
         addr: impl ToSocketAddrs,

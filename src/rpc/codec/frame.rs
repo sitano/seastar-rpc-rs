@@ -57,8 +57,9 @@ impl FrameLayout {
     }
 }
 
-/// Client → server call.
+/// Client → server call. Build one with [`RequestFrame::new`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RequestFrame {
     /// Remaining time budget in ms; `0` means no timeout. Only on the wire
     /// when `TIMEOUT` was negotiated.
@@ -70,6 +71,23 @@ pub struct RequestFrame {
 }
 
 impl RequestFrame {
+    /// A call with no timeout. `msg_id` must be positive and unique on the
+    /// connection.
+    pub fn new(msg_id: i64, verb: Verb, payload: Bytes) -> Self {
+        RequestFrame {
+            timeout_ms: 0,
+            verb,
+            msg_id,
+            payload,
+        }
+    }
+
+    /// Set the remaining time budget; `None` means no timeout.
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout_ms = Self::timeout_ms_for(timeout);
+        self
+    }
+
     /// Wire value for a remaining time budget: `0` is reserved for "no
     /// timeout", so a budget under 1 ms is rounded up.
     pub fn timeout_ms_for(remaining: Option<Duration>) -> u64 {
@@ -83,7 +101,8 @@ impl RequestFrame {
 /// Server → client reply (or exception) for a call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseFrame {
-    /// The call's `msg_id`, negated when the payload is an exception.
+    /// The call's `msg_id`, negated when the payload is an exception. Use
+    /// [`ResponseFrame::call_id`] to match a reply to its call.
     pub msg_id: i64,
     /// Handler run time in µs, when `HANDLER_DURATION` was negotiated
     /// ([`HANDLER_DURATION_UNKNOWN`] if not measured).
