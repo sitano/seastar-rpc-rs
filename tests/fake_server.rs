@@ -818,8 +818,8 @@ async fn batch_is_reusable() {
     let r = sums(&mut batch, with_timeout(Duration::from_millis(100))).await;
     assert!(matches!(r[..], [Err(Error::Timeout), Ok(6)]), "{r:?}");
 
-    // Fire and forget: the writer may still hold this state, so the next
-    // push may move to another one.
+    // Fire and forget: the queue still holds this state, so the next push
+    // moves to another one (see batch_push_after_no_wait_switches_state).
     batch.push(FIRE, ());
     let r: Vec<_> = batch.send_with(NO_WAIT).await.unwrap().collect();
     assert!(matches!(r[..], [Ok(_)]), "{r:?}");
@@ -834,6 +834,152 @@ async fn batch_is_reusable() {
     batch.clear();
     assert!(batch.is_empty());
     assert!(sums(&mut batch, CallOptions::default()).await.is_empty());
+}
+
+#[tokio::test]
+async fn batch_push_after_no_wait_switches_state() {
+    let (tx, mut verbs) = tokio::sync::mpsc::unbounded_channel();
+    let addr = serve(accepting(false, false), |mut s| async move {
+        while let Some(Ok(req)) = s.requests.next().await {
+            let _ = tx.send(req.verb);
+            if req.verb == ADD {
+                let (a, b): (i32, i32) = from_payload(req.payload).unwrap();
+                s.reply(req.msg_id, to_payload(&(a + b))).await;
+            }
+        }
+    })
+    .await;
+    let client = Client::builder().connect(addr).await.unwrap();
+    let mut batch = client.batch();
+
+    batch.push(FIRE, ());
+    batch.push(FIRE, ());
+    assert_eq!(batch.send_with(NO_WAIT).await.unwrap().len(), 2);
+
+    // A NO_WAIT send never yields, and this single-threaded runtime runs the
+    // writer only when the test yields: the queue still holds the state, so
+    // this push must switch to a fresh one.
+    batch.push(ADD, (1, 2));
+    batch.push(ADD, (3, 4));
+    let r = sums(&mut batch, CallOptions::default()).await;
+    assert!(matches!(r[..], [Ok(3), Ok(7)]), "{r:?}");
+
+    for verb in [FIRE, FIRE, ADD, ADD] {
+        assert_eq!(verbs.recv().await, Some(verb));
+    }
+}
+
+/// Writes `budget` bytes, then fails every write once `fail` fires.
+struct FailAfter<W> {
+    inner: W,
+    budget: usize,
+    fail: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for FailAfter<W> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if self.budget == 0 {
+            let _ = std::task::ready!(std::pin::Pin::new(&mut self.fail).poll(cx));
+            return std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+        }
+
+        let n = buf.len().min(self.budget);
+        let written =
+            std::task::ready!(std::pin::Pin::new(&mut self.inner).poll_write(cx, &buf[..n]))?;
+        self.budget -= written;
+
+        std::task::Poll::Ready(Ok(written))
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[tokio::test]
+async fn batch_writer_error_fails_unsent_items() {
+    const ITEM: usize = 16 << 10;
+
+    let (client_read, mut server_write) = tokio::io::duplex(1 << 16);
+    let (client_write, mut server_read) = tokio::io::duplex(1 << 16);
+    let (fail_tx, fail_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let features = accepting(false, false);
+        read_negotiation(&mut server_read).await.unwrap();
+        write_negotiation(&mut server_write, &features)
+            .await
+            .unwrap();
+
+        let layout = FrameLayout::new(&features, 1 << 20);
+        let mut requests = FramedRead::new(server_read, RequestCodec::new(layout));
+        let mut responses = FramedWrite::new(server_write, ResponseCodec::new(layout));
+
+        let first = requests.next().await.unwrap().unwrap();
+        let frame = ResponseFrame {
+            msg_id: first.msg_id,
+            handler_duration: None,
+            payload: to_payload(&1i32),
+        };
+        responses.send(frame).await.unwrap();
+
+        // Let the client's reader take the reply before the write fails.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        fail_tx.send(()).unwrap();
+
+        // Keep both pipes open: only the client's writer sees the failure.
+        std::future::pending::<()>().await;
+        drop((requests, responses));
+    });
+
+    // Room for the handshake and the first item, not the second.
+    let write = FailAfter {
+        inner: client_write,
+        budget: ITEM + 4096,
+        fail: fail_rx,
+    };
+    let client = Client::builder()
+        .handshake(client_read, write)
+        .await
+        .unwrap();
+
+    let mut batch = client.batch();
+    for _ in 0..3 {
+        batch.push_raw(ADD, vec![0u8; ITEM]);
+    }
+    let r = sums(&mut batch, CallOptions::default()).await;
+    assert!(
+        matches!(
+            r[..],
+            [
+                Ok(1),
+                Err(Error::Io(_) | Error::Closed),
+                Err(Error::Io(_) | Error::Closed)
+            ]
+        ),
+        "{r:?}"
+    );
+
+    assert!(client.is_closed());
+    batch.push_raw(ADD, vec![0u8; ITEM]);
+    assert!(matches!(
+        batch.send().await,
+        Err(Error::Io(_) | Error::Closed)
+    ));
+    assert_eq!(batch.len(), 1, "a rejected batch keeps its requests");
 }
 
 /// A batch whose send is leaked while waiting for queue room. The leaked
