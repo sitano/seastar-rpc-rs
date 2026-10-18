@@ -116,11 +116,26 @@ fn recycle_drops_oversized_arena() {
 }
 
 #[test]
-fn recycle_forgets_arena_hint() {
+fn recycle_keeps_arena_hint_with_arena() {
     let shared = Shared::default();
     let mut state = Arc::new(BatchState::default());
 
-    Arc::get_mut(&mut state).unwrap().arena_hint = POOL_ARENA_MAX;
+    let s = Arc::get_mut(&mut state).unwrap();
+    s.arena.reserve(8 * 1024);
+    s.arena_hint = 8 * 1024;
+    shared.recycle(state);
+
+    assert_eq!(shared.take_batch_state().arena_hint, 8 * 1024);
+}
+
+#[test]
+fn recycle_forgets_arena_hint_with_dropped_arena() {
+    let shared = Shared::default();
+    let mut state = Arc::new(BatchState::default());
+
+    let s = Arc::get_mut(&mut state).unwrap();
+    s.arena.reserve(2 * POOL_ARENA_MAX);
+    s.arena_hint = POOL_ARENA_MAX;
     shared.recycle(state);
 
     assert_eq!(shared.take_batch_state().arena_hint, 0);
