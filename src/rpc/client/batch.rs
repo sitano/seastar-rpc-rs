@@ -399,6 +399,76 @@ impl Batch {
 
     /// Send the pushed requests and leave their results in `replies`.
     async fn exchange(&mut self, opts: CallOptions) -> Result<()> {
+        self.replies.clear();
+
+        if self.len == 0 {
+            return Ok(());
+        }
+
+        let deadline = self.inner.deadline(&opts);
+        let base = self.stamp(&opts, deadline);
+
+        if opts.no_wait_send && opts.no_wait_recv {
+            return self.fire_and_forget();
+        }
+
+        self.round_trip(&opts, deadline, base).await
+    }
+
+    /// Give the pushed requests their msg_ids, deadline and ack flag. Returns
+    /// the first msg_id.
+    ///
+    /// # Panics
+    ///
+    /// After a [leaked send](Self#leaked-sends).
+    fn stamp(&mut self, opts: &CallOptions, deadline: Option<Instant>) -> i64 {
+        let base = self
+            .inner
+            .next_id
+            .fetch_add(self.len as i64, Ordering::Relaxed);
+        let ack = opts.no_wait_recv && !opts.no_wait_send;
+
+        let state = self.state.as_mut().expect(LIVE);
+
+        // Unsent requests in a state the batch doesn't own: a send leaked.
+        let Some(owned) = Arc::get_mut(state) else {
+            leaked(&self.inner, state, &mut self.len, &mut self.encoded);
+        };
+
+        let requests = owned.requests.get_mut().unwrap();
+        for (r, msg_id) in requests.iter_mut().zip(base..) {
+            r.msg_id = msg_id;
+            r.deadline = deadline;
+            r.ack = ack;
+        }
+
+        base
+    }
+
+    /// Queue the requests without waiting for anything. Nothing will
+    /// complete a slot, so none is registered; every result is an empty `Ok`.
+    fn fire_and_forget(&mut self) -> Result<()> {
+        let state = self.state.as_ref().expect(LIVE);
+
+        self.inner.shared.check_open()?;
+        self.inner.try_queue(Outgoing::Many(state.clone()))?;
+
+        let n = std::mem::take(&mut self.len);
+        self.encoded = 0;
+
+        self.replies.resize_with(n, || Some(Ok(Bytes::new())));
+
+        Ok(())
+    }
+
+    /// Register the requests, queue them and wait for every reply or the
+    /// deadline. Unfinished results stay `None`, read as `Err(Timeout)`.
+    async fn round_trip(
+        &mut self,
+        opts: &CallOptions,
+        deadline: Option<Instant>,
+        base: i64,
+    ) -> Result<()> {
         let n = self.len;
         let Batch {
             inner,
@@ -409,40 +479,6 @@ impl Batch {
         } = self;
 
         let state = state.as_mut().expect(LIVE);
-        replies.clear();
-
-        if n == 0 {
-            return Ok(());
-        }
-
-        let deadline = inner.deadline(&opts);
-        let ack = opts.no_wait_recv && !opts.no_wait_send;
-        let base = inner.next_id.fetch_add(n as i64, Ordering::Relaxed);
-
-        // Unsent requests in a state the batch doesn't own: a send leaked.
-        let Some(owned) = Arc::get_mut(state) else {
-            leaked(inner, state, len, encoded);
-        };
-
-        let requests = owned.requests.get_mut().unwrap();
-        for (r, msg_id) in requests.iter_mut().zip(base..) {
-            r.msg_id = msg_id;
-            r.deadline = deadline;
-            r.ack = ack;
-        }
-
-        if opts.no_wait_send && opts.no_wait_recv {
-            // Fire and forget: nothing will complete a slot, so don't register any.
-            inner.shared.check_open()?;
-            inner.try_queue(Outgoing::Many(state.clone()))?;
-
-            *len = 0;
-            *encoded = 0;
-
-            replies.extend((0..n).map(|_| Some(Ok(Bytes::new()))));
-
-            return Ok(());
-        }
 
         let unique = "a batch with unsent requests owns its state";
         Arc::get_mut(state).expect(unique).arm(n);
@@ -475,22 +511,19 @@ impl Batch {
             Ok::<(), Error>(())
         };
 
-        let finished = match before(deadline, exchange).await {
+        // After fence() or forget_many(), no reply touches the state: it can
+        // be reused at once.
+        match before(deadline, exchange).await {
             Some(r) => {
                 r?;
-                true
+                inner.shared.fence();
             }
 
             // Deadline passed before there was queue room: nothing sent.
             None if *len != 0 => return Err(Error::Timeout),
-            None => false,
-        };
 
-        // After this, no reply touches the state: it can be reused at once.
-        if finished {
-            inner.shared.fence();
-        } else {
-            inner.shared.forget_many(base, n);
+            // Deadline passed while waiting for replies.
+            None => inner.shared.forget_many(base, n),
         }
 
         std::mem::swap(&mut *state.results.lock().unwrap(), replies);
