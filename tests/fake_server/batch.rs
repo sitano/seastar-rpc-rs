@@ -194,10 +194,9 @@ async fn batch_no_wait_send_queue_full_keeps_requests() {
     let mut batch = client.batch();
     batch.push(OTHER, ());
     batch.push(OTHER, ());
-    assert!(matches!(
-        batch.send_with(NO_WAIT).await,
-        Err(Error::QueueFull)
-    ));
+    // The batch is usable again while the result is still in scope.
+    let rejected = batch.send_with(NO_WAIT).await;
+    assert!(matches!(rejected, Err(Error::QueueFull)));
     assert_eq!(batch.len(), 2, "a rejected batch keeps its requests");
     assert!(matches!(
         batch.send_with(CallOptions::default().no_wait_send()).await,
@@ -318,10 +317,8 @@ async fn batch_dropped_then_late_replies_are_ignored() {
     let mut batch = client.batch();
     batch.push(ADD, (0, 0));
     batch.push(ADD, (0, 0));
-    let abandoned = tokio::time::timeout(Duration::from_millis(20), batch.send())
-        .await
-        .is_err();
-    assert!(abandoned);
+    let abandoned = tokio::time::timeout(Duration::from_millis(20), batch.send()).await;
+    assert!(abandoned.is_err());
     // The batch was queued before it was abandoned: it is empty and reusable.
     assert!(batch.is_empty());
     batch.push(ADD, (2, 3));
