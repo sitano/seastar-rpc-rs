@@ -9,6 +9,7 @@ use seastar_rpc::rpc::codec::exception::RemoteException;
 use seastar_rpc::rpc::codec::frame::{FrameLayout, RequestCodec, ResponseCodec, ResponseFrame};
 use seastar_rpc::rpc::codec::negotiation::{read_negotiation, write_negotiation};
 use seastar_rpc::rpc::codec::serialize::to_payload;
+use seastar_rpc::rpc::raw::RawConnection;
 use seastar_rpc::rpc::{CallOptions, Client, Error};
 use tokio::net::TcpListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -29,8 +30,12 @@ async fn raw_connection_yields_every_response() {
     })
     .await;
 
-    let raw = Client::builder().connect_raw(addr).await.unwrap();
-    let (mut tx, mut rx, features) = raw.into_parts();
+    let RawConnection {
+        sender: mut tx,
+        receiver: mut rx,
+        features,
+        ..
+    } = Client::builder().connect_raw(addr).await.unwrap();
     assert!(features.timeout);
     tx.send_request(
         10,

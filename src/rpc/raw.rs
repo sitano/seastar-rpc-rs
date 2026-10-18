@@ -17,14 +17,14 @@ use futures_util::{Sink, SinkExt, Stream};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use crate::rpc::codec::frame::{
-    FrameLayout, RequestCodec, RequestFrame, ResponseCodec, ResponseFrame,
-};
+use crate::rpc::codec::frame::{FrameLayout, RequestCodec, ResponseCodec};
+pub use crate::rpc::codec::frame::{RequestFrame, ResponseFrame};
 use crate::rpc::codec::negotiation::Features;
 use crate::rpc::error::{Error, Result};
 use crate::rpc::verb::Verb;
 
-/// A negotiated connection, split into its two directions.
+/// A negotiated connection, split into its two directions. Take it apart
+/// with `let RawConnection { sender, receiver, features, .. } = conn;`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RawConnection<R, W> {
@@ -32,12 +32,6 @@ pub struct RawConnection<R, W> {
     pub receiver: RawReceiver<R>,
     /// Features the server accepted.
     pub features: Features,
-}
-
-impl<R, W> RawConnection<R, W> {
-    pub fn into_parts(self) -> (RawSender<W>, RawReceiver<R>, Features) {
-        (self.sender, self.receiver, self.features)
-    }
 }
 
 /// Write half: a `Sink` of request frames.
@@ -64,13 +58,8 @@ impl<W: AsyncWrite + Unpin> RawSender<W> {
         payload: Bytes,
         timeout: Option<Duration>,
     ) -> Result<()> {
-        let frame = RequestFrame {
-            timeout_ms: RequestFrame::timeout_ms_for(timeout),
-            verb,
-            msg_id,
-            payload,
-        };
-        self.send(frame).await
+        self.send(RequestFrame::new(msg_id, verb, payload).with_timeout(timeout))
+            .await
     }
 
     /// The header layout in use.

@@ -147,8 +147,8 @@ it; once queued, each item has its own result. See section 8 of
 ### Raw connection
 
 ```rust
-let conn = Client::builder().connect_raw("127.0.0.1:10000").await?;
-let (mut tx, rx, features) = conn.into_parts();
+let RawConnection { sender: mut tx, receiver: rx, features, .. } =
+    Client::builder().connect_raw("127.0.0.1:10000").await?;
 tx.send_request(1, ADD, payload, None).await?;
 ```
 
