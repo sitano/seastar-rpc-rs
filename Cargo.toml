@@ -1,6 +1,6 @@
 [package]
 name = "seastar-rpc"
-version = "0.1.1-rc.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Seastar RPC async Rust server/client"
@@ -9,7 +9,7 @@ documentation = "https://docs.rs/seastar-rpc"
 keywords = ["seastar", "scylla", "rpc"]
 categories = ["asynchronous", "network-programming", "database"]
 license = "MIT OR Apache-2.0"
-exclude = [".github/", "Makefile", "docs/TODO_*"]
+exclude = [".github/", "Makefile", "docs/TODO_*", "AGENTS.md", "CLAUDE.md", ".claude/", ".gitmessage"]
 
 [dependencies]
 bytes = "1"
