@@ -115,21 +115,34 @@ impl BatchState {
 
     /// Apply the pool limits: drop an oversized arena and shrink the lists.
     pub(super) fn reset(&mut self) {
-        self.shrink_arena(POOL_ARENA_MAX);
+        let hint = self.arena_hint;
+
+        // Keep the hint while the arena stays, so the next pooled send
+        // reserves room for a whole send, as a reused batch does. Without it
+        // a send larger than one chunk allocates every time. The hint is
+        // capped at `POOL_ARENA_MAX`, an arena size the pool keeps anyway.
+        if !self.shrink_arena(POOL_ARENA_MAX) {
+            self.arena_hint = hint;
+        }
+
         self.shrink_slots(POOL_SLOTS_MAX);
     }
 
     /// Drop the arena if it holds more than `size` bytes, and forget the
-    /// largest send so the next one reserves only what it needs.
-    pub(super) fn shrink_arena(&mut self, size: usize) {
+    /// largest send so the next one reserves only what it needs. Returns
+    /// whether the arena was dropped.
+    pub(super) fn shrink_arena(&mut self, size: usize) -> bool {
         self.arena.clear();
         self.arena_hint = 0;
 
         // `capacity()` only counts what follows the last split; reclaiming
         // more than `size` succeeds only if the whole buffer is larger.
-        if self.arena.try_reclaim(size.saturating_add(1)) {
+        let dropped = self.arena.try_reclaim(size.saturating_add(1));
+        if dropped {
             self.arena = BytesMut::new();
         }
+
+        dropped
     }
 
     /// Empty the request and result lists and shrink them to room for
