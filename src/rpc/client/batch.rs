@@ -68,11 +68,11 @@ pub struct Batch {
     inner: Arc<Inner>,
     /// `None` only while dropping.
     state: Option<Arc<BatchState>>,
-    /// Requests pushed since the last send was queued.
-    len: usize,
     /// Results of the last send. Swapped with the state's list on the next
     /// one, so both keep their capacity.
     replies: Vec<Option<Result<Bytes>>>,
+    /// Requests pushed since the last send was queued.
+    len: usize,
     /// Payload bytes pushed since the last send was queued.
     encoded: usize,
 }
@@ -87,9 +87,11 @@ impl Batch {
     pub(super) fn new(inner: Arc<Inner>) -> Self {
         let mut state = inner.shared.take_batch_state();
         let replies = std::mem::take(
-            &mut Arc::get_mut(&mut state)
+            Arc::get_mut(&mut state)
                 .expect("pooled batch state is unique")
-                .spare,
+                .spare
+                .get_mut()
+                .unwrap(),
         );
 
         Batch {
@@ -378,8 +380,18 @@ impl Batch {
             }
 
             // The last send was fire-and-forget or abandoned: the writer
-            // still holds that state and pools it when done.
-            *state = self.inner.shared.take_batch_state();
+            // still holds that state and pools it when done. Give it back
+            // our result list, so it returns to the pool with a spare.
+            *state.spare.lock().unwrap() = std::mem::take(&mut self.replies);
+
+            // The writer may have let go since the check: then pool it here.
+            let old = std::mem::replace(state, self.inner.shared.take_batch_state());
+            self.inner.shared.recycle(old);
+
+            let fresh = Arc::get_mut(state).expect("pooled batch state is unique");
+            self.replies = std::mem::take(fresh.spare.get_mut().unwrap());
+
+            return fresh;
         }
 
         Arc::get_mut(state).expect("pooled batch state is unique")
@@ -391,8 +403,8 @@ impl Batch {
         let Batch {
             inner,
             state,
-            len,
             replies,
+            len,
             encoded,
         } = self;
 
@@ -459,6 +471,7 @@ impl Batch {
             *encoded = 0;
 
             std::future::poll_fn(|cx| state.poll_done(cx)).await;
+
             Ok::<(), Error>(())
         };
 
@@ -492,8 +505,11 @@ impl Drop for Batch {
             return;
         };
 
-        if let Some(s) = Arc::get_mut(&mut state) {
-            s.spare = std::mem::take(&mut self.replies);
+        // Shared: the writer still holds it and pools it when done.
+        let replies = std::mem::take(&mut self.replies);
+        match Arc::get_mut(&mut state) {
+            Some(s) => *s.spare.get_mut().unwrap() = replies,
+            None => *state.spare.lock().unwrap() = replies,
         }
 
         self.inner.shared.recycle(state);
@@ -581,5 +597,59 @@ struct BatchGuard<'a> {
 impl Drop for BatchGuard<'_> {
     fn drop(&mut self) {
         self.shared.forget_many(self.base, self.n);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicI64;
+
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    fn inner() -> (Arc<Inner>, mpsc::Receiver<Outgoing>) {
+        let (tx, rx) = mpsc::channel(1);
+
+        let inner = Inner {
+            features: Default::default(),
+            default_timeout: None,
+            next_id: AtomicI64::new(1),
+            shared: Arc::new(Shared::default()),
+            tx,
+        };
+
+        (Arc::new(inner), rx)
+    }
+
+    #[test]
+    fn state_switch_keeps_both_spares() {
+        let (inner, _rx) = inner();
+        let mut batch = Batch::new(inner.clone());
+        batch.replies.reserve(8);
+
+        // Stand-in for the writer holding the state after a fire-and-forget send.
+        let held = batch.state.clone().unwrap();
+        batch.push(0, ());
+        assert!(!Arc::ptr_eq(&held, batch.state.as_ref().unwrap()));
+
+        // The held state got the batch's result list back.
+        assert!(held.spare.lock().unwrap().capacity() >= 8);
+
+        // Drop with the new state shared too: its spare is kept.
+        batch.clear();
+        batch.replies.reserve(4);
+        let held2 = batch.state.clone().unwrap();
+        drop(batch);
+        assert!(held2.spare.lock().unwrap().capacity() >= 4);
+
+        inner.shared.recycle(held);
+        inner.shared.recycle(held2);
+
+        for _ in 0..2 {
+            let mut s = inner.shared.take_batch_state();
+            let spare = Arc::get_mut(&mut s).unwrap().spare.get_mut().unwrap();
+            assert!(spare.capacity() >= 4);
+        }
     }
 }

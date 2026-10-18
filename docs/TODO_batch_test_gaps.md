@@ -7,7 +7,9 @@ The review found three paths that no test covers deterministically.
 ## 1. "Writer still holds the state" switch
 
 `Batch::state_mut` (`src/rpc/client/batch.rs`) switches to a fresh pooled
-state when the writer still holds the current one. `batch_is_reusable` in
+state when the writer still holds the current one. The unit test
+`state_switch_keeps_both_spares` in `batch.rs` covers the switch itself by
+holding a clone of the state. End to end, `batch_is_reusable` in
 `tests/fake_server.rs` only says the switch *may* happen: whether the writer
 has released the state by the next push depends on timing.
 
