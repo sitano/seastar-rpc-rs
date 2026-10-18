@@ -41,6 +41,7 @@ Things that aren't obvious from one file:
 ## Rules
 
 - Never add AI co-author to commits.
+- Commit messages follow `.gitmessage` (`git config commit.template .gitmessage`): `type(scope): subject`, then a body saying why, then how. Commit with `-s`.
 - When you write English, ensure a human can understand what you are saying.
 - We track TODOs in `docs/TODO_*.md` and index them by priority in `docs/TODO_index.md`.
 - When we implement a TODO from the index we remove it. If the result comment are important write a separate doc in `docs/`.

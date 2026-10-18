@@ -1,0 +1,14 @@
+
+# <type>(<scope>): <subject>
+#
+# Why: what was wrong or missing, and its effect.
+#
+# How: what this change does about it.
+#
+# Signed-off-by: added by `git commit -s`.
+#
+# type:    feat | fix | refactor | perf | test | docs | build | ci | chore
+# scope:   module path under src/rpc, e.g. client/batch, codec/frame, raw
+# subject: imperative, lowercase, no trailing period, ~72 chars max
+# body:    wrap at 72; plain English; skip it when the subject says it all
+# Lines starting with '#' are dropped.
