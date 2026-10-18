@@ -403,14 +403,24 @@ pub(super) async fn writer<W: AsyncWrite + Unpin>(
                     }
                     Outgoing::Many(batch) => {
                         let mut requests = std::mem::take(&mut *batch.requests.lock().unwrap());
+                        let mut res = Ok(());
                         for r in requests.drain(..) {
-                            feed(&mut sink, r, &shared, &mut acks).await?;
+                            if let Err(e) = feed(&mut sink, r, &shared, &mut acks).await {
+                                // Dropping the drain discards the unsent rest;
+                                // the connection is dead, so their slots fail.
+                                res = Err(e);
+                                break;
+                            }
                             written += 1;
                         }
+
                         // Hand the empty list back, then pool the state if
                         // its batch is gone (fire-and-forget or abandoned).
+                        // Done before propagating an error so the list keeps
+                        // its capacity.
                         *batch.requests.lock().unwrap() = requests;
                         shared.recycle(batch);
+                        res?;
                     }
                 }
                 if written < MAX_BATCH {

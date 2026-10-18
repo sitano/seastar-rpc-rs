@@ -35,7 +35,8 @@ closes the connection (or a test `AsyncWrite` that fails after N bytes):
 - The client then reports closed; a new `send` returns the outer `Err(Closed)`
   and keeps the requests in the batch.
 
-See also `TODO_writer_error_drops_requests_vec.md`.
+The writer puts the batch's request list back and recycles the state before
+propagating the error, so the list keeps its capacity.
 
 ## 3. Arena size check after a split, end to end
 
