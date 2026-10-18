@@ -224,5 +224,5 @@ and works normally. The lost queue slot and the leaked pending entries remain.
   `src/rpc/client/batch.rs`.
 - API docs: the `# Leaked sends` section on `Batch`, linked from the
   `# Panics` notes on `push`, `push_raw`, `clear` and `send`.
-- Tests in `tests/fake_server.rs`: `batch_send_after_leaked_send_panics` and
+- Tests in `tests/fake_server/batch.rs`: `batch_send_after_leaked_send_panics` and
   `batch_is_usable_after_leak_panic`.

@@ -34,7 +34,7 @@ Things that aren't obvious from one file:
 - The verb table for the reference server is in `examples/seastar/HACKING.md`; `examples/seastar/rpc_server.cc` implements it. Adding a verb used by interop tests means editing the C++ server too.
 - Leaked (`mem::forget`) send futures permanently lose a queue slot; a leaked `Batch` panics on next use with `BATCH_LEAKED_PANIC`. Dropping/cancelling is always safe. See `docs/leaked-send-futures.md`.
 - `Batch::send` returning outer `Err` means nothing was queued and the requests are still in the batch; once queued each item has its own result.
-- `tests/fake_server.rs` builds a scripted in-process server from the crate's own codecs in the server direction — the place for deterministic client behaviour tests without C++.
+- `tests/fake_server/` builds a scripted in-process server (`server.rs`) from the crate's own codecs in the server direction — the place for deterministic client behaviour tests without C++. Tests are split by topic: `calls.rs`, `connection.rs`, `batch.rs`.
 - Known batch follow-ups are tracked in `docs/TODO_index.md` / `docs/TODO_*.md` (excluded from the published crate).
 - API design rationale (builder + cheap-clone handle, actor-per-connection, `#[non_exhaustive]` public types, transport vs application errors): `docs/client-api-examples.md`.
 
