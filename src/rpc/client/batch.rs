@@ -336,7 +336,7 @@ impl Batch {
     pub async fn send_with(&mut self, opts: CallOptions) -> Result<Replies<'_>> {
         self.exchange(opts).await?;
 
-        Ok(Replies(self.replies.drain(..)))
+        Ok(Replies(self.replies.iter_mut()))
     }
 
     /// [`send`](Self::send), decoding every reply as `Rep`.
@@ -550,13 +550,17 @@ impl Drop for Batch {
 }
 
 /// Replies of a [`Batch::send`], in push order.
-pub struct Replies<'a>(std::vec::Drain<'a, Option<Result<Bytes>>>);
+///
+/// Takes each slot out instead of draining the vector: `Drain` has drop
+/// glue, which would keep the batch borrowed for the whole scope of the
+/// `send` result, `Err` included. Unread slots are cleared on the next send.
+pub struct Replies<'a>(std::slice::IterMut<'a, Option<Result<Bytes>>>);
 
 impl Iterator for Replies<'_> {
     type Item = Result<Bytes>;
 
     fn next(&mut self) -> Option<Result<Bytes>> {
-        self.0.next().map(reply)
+        self.0.next().map(|slot| reply(slot.take()))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
