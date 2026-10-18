@@ -1,6 +1,7 @@
 //! A warmed-up batch allocates nothing per send: neither a reused `Batch`
 //! nor the pooled `call_many`, nor a send that starts with `push_raw`.
-//! `Batch::shrink` frees an outlier's memory.
+//! `Batch::shrink` frees an outlier's memory, and the pool drops an outlier
+//! `call_many`'s arena.
 //!
 //! Its own test binary: dhat replaces the global allocator, and its testing
 //! profiler admits one test at a time.
@@ -10,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use seastar_rpc::rpc::codec::frame::{FrameLayout, RequestCodec, ResponseCodec, ResponseFrame};
 use seastar_rpc::rpc::codec::negotiation::{Features, read_negotiation, write_negotiation};
 use seastar_rpc::rpc::codec::serialize::from_payload;
-use seastar_rpc::rpc::{Batch, Client, Verb};
+use seastar_rpc::rpc::{Batch, CallOptions, Client, Verb};
 use tokio::net::TcpListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -40,7 +41,7 @@ async fn server() -> std::net::SocketAddr {
         read_negotiation(&mut read).await.unwrap();
         let features = Features::default();
         write_negotiation(&mut write, &features).await.unwrap();
-        let layout = FrameLayout::new(&features, 1 << 20);
+        let layout = FrameLayout::new(&features, 4 << 20);
         let mut requests = FramedRead::new(read, RequestCodec::new(layout));
         let mut responses = FramedWrite::new(write, ResponseCodec::new(layout));
         while let Some(Ok(r)) = requests.next().await {
@@ -151,4 +152,23 @@ async fn warm_batches_do_not_allocate_per_send() {
     let freed = grown - dhat::HeapStats::get().curr_bytes;
 
     assert!(freed > 100_000, "shrink freed {freed} bytes");
+
+    // An outlier `call_many` leaves no large arena in the pool. 2 MiB is
+    // twice the pool's arena limit. A first call that uses no arena grows
+    // the connection's read and write buffers, so they don't count below.
+    let big = vec![0u8; 2 << 20];
+    client
+        .call_raw(ADD, Bytes::from(big.clone()), CallOptions::default())
+        .await
+        .unwrap();
+
+    let before = dhat::HeapStats::get().curr_bytes;
+    client
+        .call_many::<_, i32>(ADD, [&big[..]])
+        .await
+        .unwrap()
+        .for_each(drop);
+    let kept = dhat::HeapStats::get().curr_bytes.saturating_sub(before);
+
+    assert!(kept < 1 << 20, "pooled call_many state kept {kept} bytes");
 }
