@@ -389,52 +389,10 @@ pub(super) async fn writer<W: AsyncWrite + Unpin>(
             _ = &mut closed => break,
         };
 
-        let batch = async {
-            let mut next = Some(first);
-            let mut written = 0;
-
-            // `MAX_BATCH` is checked between messages, so a `Many` is never
-            // split across flushes.
-            while let Some(o) = next.take() {
-                match o {
-                    Outgoing::One(r) => {
-                        feed(&mut sink, r, &shared, &mut acks).await?;
-                        written += 1;
-                    }
-                    Outgoing::Many(batch) => {
-                        let mut requests = std::mem::take(&mut *batch.requests.lock().unwrap());
-                        let mut res = Ok(());
-                        for r in requests.drain(..) {
-                            if let Err(e) = feed(&mut sink, r, &shared, &mut acks).await {
-                                // Dropping the drain discards the unsent rest;
-                                // the connection is dead, so their slots fail.
-                                res = Err(e);
-                                break;
-                            }
-                            written += 1;
-                        }
-
-                        // Hand the empty list back, then pool the state if
-                        // its batch is gone (fire-and-forget or abandoned).
-                        // Done before propagating an error so the list keeps
-                        // its capacity.
-                        *batch.requests.lock().unwrap() = requests;
-                        shared.recycle(batch);
-                        res?;
-                    }
-                }
-                if written < MAX_BATCH {
-                    next = rx.try_recv().ok();
-                }
-            }
-
-            sink.flush().await
-        };
-
         // A write blocks for as long as the peer doesn't read. If the reader
         // closes the connection meanwhile, abandon the write instead.
         let flushed = tokio::select! {
-            r = batch => r,
+            r = write_burst(&mut sink, &mut rx, first, &shared, &mut acks) => r,
             _ = &mut closed => break,
         };
 
@@ -454,6 +412,66 @@ pub(super) async fn writer<W: AsyncWrite + Unpin>(
     // Connection is dead: `close` already failed every pending call,
     // including queued and unflushed no-wait ones. Dropping `rx` fails
     // callers still trying to queue.
+}
+
+/// Write `first` and whatever else is already queued, up to `MAX_BATCH`
+/// requests, then flush them together.
+async fn write_burst<W: AsyncWrite + Unpin>(
+    sink: &mut RawSender<W>,
+    rx: &mut mpsc::Receiver<Outgoing>,
+    first: Outgoing,
+    shared: &Shared,
+    acks: &mut Vec<i64>,
+) -> Result<()> {
+    let mut next = Some(first);
+    let mut written = 0;
+
+    // `MAX_BATCH` is checked between messages, so a `Many` is never split
+    // across flushes.
+    while let Some(o) = next.take() {
+        written += match o {
+            Outgoing::One(r) => {
+                feed(sink, r, shared, acks).await?;
+                1
+            }
+            Outgoing::Many(batch) => feed_many(sink, batch, shared, acks).await?,
+        };
+
+        if written < MAX_BATCH {
+            next = rx.try_recv().ok();
+        }
+    }
+
+    sink.flush().await
+}
+
+/// Feed a batch's requests back to back; returns how many it had.
+async fn feed_many<W: AsyncWrite + Unpin>(
+    sink: &mut RawSender<W>,
+    batch: Arc<BatchState>,
+    shared: &Shared,
+    acks: &mut Vec<i64>,
+) -> Result<usize> {
+    let mut requests = std::mem::take(&mut *batch.requests.lock().unwrap());
+    let n = requests.len();
+
+    // On error, dropping the drain discards the unsent rest; the connection
+    // is dead, so their slots fail.
+    let res = async {
+        for r in requests.drain(..) {
+            feed(sink, r, shared, acks).await?;
+        }
+        Ok(n)
+    }
+    .await;
+
+    // Hand the empty list back, then pool the state if its batch is gone
+    // (fire-and-forget or abandoned). Done before propagating an error so the
+    // list keeps its capacity.
+    *batch.requests.lock().unwrap() = requests;
+    shared.recycle(batch);
+
+    res
 }
 
 async fn feed<W: AsyncWrite + Unpin>(
