@@ -1,8 +1,9 @@
 //! Rust counterpart of `examples/seastar/rpc_client.cc` for a few verbs.
 //!
 //! ```text
-//! cargo run --example client -- [--server host:port] [--timeout ms] [--no-wait-recv] [--no-wait-send] VERB [args...]
+//! cargo run --example client -- [--server host:port] [--compress lz4|lz4_fragmented] [--timeout ms] [--no-wait-recv] [--no-wait-send] VERB [args...]
 //! cargo run --example client -- 2 3 4        # verb 2 -> 7
+//! cargo run --example client -- --compress lz4 2 3 4   # needs rpc_server --compress true
 //! cargo run --example client -- --no-wait-recv no_wait   # don't wait for a reply, only the write
 //! RUSTFLAGS="--cfg dhat_heap" cargo run --example client -- 2 3 4   # also writes dhat-heap.json
 //! ```
@@ -11,12 +12,14 @@ use std::time::Duration;
 
 use seastar_rpc::rpc::{Client, with_timeout};
 
+mod common;
+
 #[cfg(dhat_heap)]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 const USAGE: &str =
-    "usage: client [--server host:port] [--timeout ms] [--count N] [--no-wait-recv] [--no-wait-send] [--no-wait] VERB [args...]
+    "usage: client [--server host:port] [--compress lz4|lz4_fragmented[,...]] [--timeout ms] [--count N] [--no-wait-recv] [--no-wait-send] [--no-wait] VERB [args...]
 verbs: add(2) <int> <int> | sin(3) <double> | throw(4) | no_wait(5) | pair(10) | echo(15) <string> | add_quiet(16) <int> <int>
 ";
 
@@ -44,7 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut no_wait_send = false;
     let mut no_wait_recv = false;
     let mut rest = Vec::new();
-    let mut args = std::env::args().skip(1);
+    let (args, compression) = common::args()?;
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--server" => server = args.next().ok_or(USAGE)?,
@@ -61,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let verb = verb.parse::<Verb>()?;
 
     let client = Client::builder()
+        .offer_compression(compression)
         .connect_timeout(timeout)
         .connect(server)
         .await?;

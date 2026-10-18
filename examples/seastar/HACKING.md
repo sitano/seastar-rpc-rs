@@ -2,8 +2,8 @@
 
 `rpc_server.cc` and `rpc_client.cc` are a small Seastar RPC server and
 client demo, built against Seastar via CMake's `find_package(Seastar)`
-support: either an installed Seastar or a local build tree. They share the payload serializer and LZ4
-compressor factory in `rpc_serializer.hh`.
+support: either an installed Seastar or a local build tree. They share the payload serializer and the
+compressor factory (`LZ4` and `LZ4_FRAGMENTED`) in `rpc_serializer.hh`.
 
 ## Prerequisites
 
@@ -84,7 +84,10 @@ This produces `build/rpc_server` and `build/rpc_client`.
 ./build/rpc_client --server 127.0.0.1:10000 2 3 4      # verb 2 -> 7
 ```
 
-Pass `--compress true` on both sides to exercise the LZ4 compressor path.
+Pass `--compress true` on both sides to compress traffic. The server then
+accepts `LZ4` and `LZ4_FRAGMENTED`, whichever the client prefers; the C++
+client prefers `LZ4_FRAGMENTED`. `make seastar-server` starts it with
+`--compress true` so `make test-interop` covers both.
 The client also takes `--timeout <ms>` (default 5000).
 
 ## Verbs

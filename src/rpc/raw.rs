@@ -6,7 +6,8 @@
 //! `msg_id`, and a [`RawReceiver`] (`Stream<Item = Result<ResponseFrame>>`)
 //! that yields every response, in arrival order, with nothing kept in a
 //! pending-call table. The multiplexed [`Client`](crate::rpc::Client) is built on
-//! top of these two halves.
+//! top of these two halves. A negotiated compression is applied underneath,
+//! so frames always come and go uncompressed.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -17,6 +18,7 @@ use futures_util::{Sink, SinkExt, Stream};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+use crate::rpc::codec::compress::{Compression, CompressionCodec};
 use crate::rpc::codec::frame::{FrameLayout, RequestCodec, ResponseCodec};
 pub use crate::rpc::codec::frame::{RequestFrame, ResponseFrame};
 use crate::rpc::codec::negotiation::Features;
@@ -37,14 +39,15 @@ pub struct RawConnection<R, W> {
 /// Write half: a `Sink` of request frames.
 #[derive(Debug)]
 pub struct RawSender<W> {
-    inner: FramedWrite<W, RequestCodec>,
+    inner: FramedWrite<W, CompressionCodec<RequestCodec>>,
     layout: FrameLayout,
 }
 
 impl<W: AsyncWrite + Unpin> RawSender<W> {
-    pub(crate) fn new(write: W, layout: FrameLayout) -> Self {
+    pub(crate) fn new(write: W, layout: FrameLayout, compression: Option<Compression>) -> Self {
+        let codec = CompressionCodec::new(RequestCodec::new(layout), layout, compression);
         RawSender {
-            inner: FramedWrite::new(write, RequestCodec::new(layout)),
+            inner: FramedWrite::new(write, codec),
             layout,
         }
     }
@@ -97,13 +100,14 @@ impl<W: AsyncWrite + Unpin> Sink<RequestFrame> for RawSender<W> {
 /// Read half: a `Stream` of every response frame. Ends on clean EOF.
 #[derive(Debug)]
 pub struct RawReceiver<R> {
-    inner: FramedRead<R, ResponseCodec>,
+    inner: FramedRead<R, CompressionCodec<ResponseCodec>>,
 }
 
 impl<R: AsyncRead + Unpin> RawReceiver<R> {
-    pub(crate) fn new(read: R, layout: FrameLayout) -> Self {
+    pub(crate) fn new(read: R, layout: FrameLayout, compression: Option<Compression>) -> Self {
+        let codec = CompressionCodec::new(ResponseCodec::new(layout), layout, compression);
         RawReceiver {
-            inner: FramedRead::new(read, ResponseCodec::new(layout)),
+            inner: FramedRead::new(read, codec),
         }
     }
 }

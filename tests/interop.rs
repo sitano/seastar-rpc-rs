@@ -6,18 +6,26 @@
 //! ```text
 //! SEASTAR_RPC_ADDR=127.0.0.1:10000 cargo test --test interop -- --ignored
 //! ```
+//!
+//! `compressed_calls` needs the server started with `--compress true`, as
+//! `make seastar-server` does.
 
 use std::time::Duration;
 
 use bytes::Bytes;
-use seastar_rpc::rpc::{CallOptions, Client, Error, with_timeout};
+use seastar_rpc::rpc::{CallOptions, Client, Compression, Error, with_timeout};
 
 // Verb ids and signatures follow examples/seastar/rpc_server.cc.
 // C++ `int` = i32, `long` = i64 on Linux.
 
 async fn client() -> Client {
+    client_compressed(None).await
+}
+
+async fn client_compressed(compression: Option<Compression>) -> Client {
     let addr = std::env::var("SEASTAR_RPC_ADDR").unwrap_or_else(|_| "127.0.0.1:10000".into());
     Client::builder()
+        .offer_compression(compression)
         .connect_timeout(Duration::from_secs(3))
         .default_timeout(Duration::from_secs(5))
         .connect(addr)
@@ -119,5 +127,35 @@ async fn concurrent() {
     for call in calls {
         let (i, r) = call.await.unwrap();
         assert_eq!(r, 2 * i);
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn compressed_calls() {
+    for algo in [Compression::Lz4, Compression::Lz4Fragmented] {
+        let c = client_compressed(Some(algo)).await;
+        let chosen = c.features().compress.as_deref();
+        assert_eq!(
+            chosen,
+            Some(algo.name().as_bytes()),
+            "start the server with --compress true"
+        );
+
+        assert_eq!(c.call::<(i32, i32), i32>(2, (3, 4)).await.unwrap(), 7);
+
+        // Over 32 KiB, so `LZ4_FRAGMENTED` splits it into chunks both ways.
+        let big: String = (0..100_000)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        assert_eq!(
+            c.call::<(String,), String>(15, (big.clone(),))
+                .await
+                .unwrap(),
+            big
+        );
+
+        let err = c.call::<(), ()>(4, ()).await.unwrap_err();
+        assert!(matches!(err, Error::Remote(_)), "{err:?}");
     }
 }

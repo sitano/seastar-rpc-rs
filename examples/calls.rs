@@ -3,12 +3,14 @@
 //! Needs the C++ reference server from `examples/seastar` (`make seastar-server`).
 //!
 //! ```text
-//! cargo run --example calls [-- host:port]
+//! cargo run --example calls [-- [--compress lz4|lz4_fragmented] host:port]
 //! ```
 
 use std::time::{Duration, Instant};
 
 use seastar_rpc::rpc::{CallOptions, Client, Error, NO_WAIT, Verb, with_timeout};
+
+mod common;
 
 /// `int (int, int)`: returns `a + b`.
 const ADD: Verb = 2;
@@ -31,10 +33,13 @@ const MISSING: Verb = 99;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = std::env::args()
-        .nth(1)
+    let (args, compression) = common::args()?;
+    let addr = args
+        .into_iter()
+        .next()
         .unwrap_or_else(|| "127.0.0.1:10000".into());
     let client = Client::builder()
+        .offer_compression(compression)
         .connect_timeout(Duration::from_secs(3))
         // Used by every call that doesn't set its own timeout.
         .default_timeout(Duration::from_secs(5))

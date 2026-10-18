@@ -7,13 +7,15 @@
 //! Needs the C++ reference server from `examples/seastar` (`make seastar-server`).
 //!
 //! ```text
-//! cargo run --release --example batches [-- host:port]
+//! cargo run --release --example batches [-- [--compress lz4|lz4_fragmented] host:port]
 //! ```
 
 use std::time::{Duration, Instant};
 
 use seastar_rpc::rpc::codec::serialize::from_payload;
 use seastar_rpc::rpc::{Client, Error, NO_WAIT, Verb, with_timeout};
+
+mod common;
 
 /// `int (int, int)`: returns `a + b` without printing on the server.
 const ADD: Verb = 16;
@@ -32,10 +34,13 @@ const MISSING: Verb = 99;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = std::env::args()
-        .nth(1)
+    let (args, compression) = common::args()?;
+    let addr = args
+        .into_iter()
+        .next()
         .unwrap_or_else(|| "127.0.0.1:10000".into());
     let client = Client::builder()
+        .offer_compression(compression)
         .default_timeout(Duration::from_secs(5))
         .connect(&addr)
         .await?;

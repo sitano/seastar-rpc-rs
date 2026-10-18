@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rust (edition 2024, MSRV 1.85) client/server for the C++ Seastar RPC wire protocol, crate `seastar-rpc`. Only the client side exists; server, compression and streaming are not implemented yet (see README "Not supported yet"). Repowise tooling notes live in `.claude/CLAUDE.md`.
+Rust (edition 2024, MSRV 1.85) client/server for the C++ Seastar RPC wire protocol, crate `seastar-rpc`. Only the client side exists; server and streaming are not implemented yet (see README "Not supported yet"). Repowise tooling notes live in `.claude/CLAUDE.md`.
 
 ## Commands
 
@@ -24,7 +24,7 @@ Needs the C++ reference server (`make seastar-server`, listens on `127.0.0.1:100
 
 Three layers under `src/rpc/`, each usable on its own:
 
-- `codec/` — role-agnostic wire format: every codec both encodes and decodes, so the same code serves a client and (future) server. `negotiation.rs` (`SSTARRPC` handshake, `Features`), `frame.rs` (request/response frames; header layout depends on negotiated features, captured once in `FrameLayout`), `exception.rs` (negative `msg_id` responses), `serialize.rs` (`Encode`/`Decode`). Module docs cite sections of `docs/rpc-wire-protocol-client-guide.md` ("wire guide §N").
+- `codec/` — role-agnostic wire format: every codec both encodes and decodes, so the same code serves a client and (future) server. `negotiation.rs` (`SSTARRPC` handshake, `Features`), `frame.rs` (request/response frames; header layout depends on negotiated features, captured once in `FrameLayout`), `compress.rs` (`COMPRESS` envelope, LZ4 / LZ4_FRAGMENTED; `CompressionCodec<C>` wraps a frame codec and passes through when off), `exception.rs` (negative `msg_id` responses), `serialize.rs` (`Encode`/`Decode`). Module docs cite sections of `docs/rpc-wire-protocol-client-guide.md` ("wire guide §N").
 - `raw.rs` — a negotiated connection as `RawSender` (`Sink<RequestFrame>`, caller picks `msg_id`) and `RawReceiver` (`Stream` of every response). No pending-call table.
 - `client/` — `Client` multiplexes calls over one raw connection. `dispatch.rs` runs separate writer and reader tasks (one task blocking on a write could deadlock against a peer blocked writing replies). Callers register a slot in a shared pending map before queueing; the reader completes it by `msg_id`. Slots hold the caller's waker, so a call allocates nothing per request. `batch.rs`: a `Batch` is one queue message whose frames are written contiguously and flushed together; its buffers are pooled and reused so a warm batch allocates nothing per send — `tests/batch_allocs.rs` asserts this with dhat (own binary because dhat replaces the global allocator).
 
@@ -35,7 +35,7 @@ Things that aren't obvious from one file:
 - Leaked (`mem::forget`) send futures permanently lose a queue slot; a leaked `Batch` panics on next use with `BATCH_LEAKED_PANIC`. Dropping/cancelling is always safe. See `docs/leaked-send-futures.md`.
 - `Batch::send` returning outer `Err` means nothing was queued and the requests are still in the batch; once queued each item has its own result.
 - `tests/fake_server/` builds a scripted in-process server (`server.rs`) from the crate's own codecs in the server direction — the place for deterministic client behaviour tests without C++. Tests are split by topic: `calls.rs`, `connection.rs`, `batch.rs`.
-- Known batch follow-ups are tracked in `docs/TODO_index.md` / `docs/TODO_*.md` (excluded from the published crate).
+- Known follow-ups are tracked as `docs/{KIND}_{COMPONENT}_P{N}_{name}.md` files (excluded from the published crate); see the rules below.
 - API design rationale (builder + cheap-clone handle, actor-per-connection, `#[non_exhaustive]` public types, transport vs application errors): `docs/client-api-examples.md`.
 
 ## Rules
@@ -43,7 +43,16 @@ Things that aren't obvious from one file:
 - Never add AI co-author to commits.
 - Commit messages follow `.gitmessage` (`git config commit.template .gitmessage`): `type(scope): subject`, then a body saying why, then how. Commit with `-s`.
 - When you write English, ensure a human can understand what you are saying.
-- We track TODOs in `docs/TODO_*.md` and index them by priority in `docs/TODO_index.md`.
-- When we implement a TODO from the index we remove it. If the result comment are important write a separate doc in `docs/`.
+- We track follow-up work as one file each in `docs/`, named `{KIND}_{COMPONENT}_P{N}_{name}.md`:
+  - `KIND` is one of `BUG` (wrong behaviour), `FEAT` (missing feature), `DESIGN` (open design question or refactor), `PERF` (speed or allocations), `TEST` (missing tests), `TODO` (anything else).
+  - `COMPONENT` is the main area the work touches, lowercase with no `_`: a module such as `codec`, `raw`, `client`, `batch`, or `crate` when it spans several.
+  - `N` is the priority, `0` (do now) to `9` (some day).
+  - `name` is short snake_case, for example `FEAT_codec_P6_pluggable_compression.md`.
+  - There is no index file: `ls docs` sorted by name shows the work grouped by kind, then by component, and the priority sits in the name.
+  - Each file starts with a `# Title`, then a `TL;DR:` paragraph saying what the work is and why, then the details.
+- Leftovers from a review that are not fixed right away become such files.
+- Before implementing something, check `docs/` for a file about it and read it.
+- When we implement one, we delete its file. If the outcome is worth keeping, write a separate doc in `docs/`.
 - When you write code, separate logical blocks by empty lines to be easy to read with an eye.
 - When you write code, comment non-obvious actions in the code for a reader to disambiguate.
+- When you write code, try minimize allocations to zero on hot-paths.

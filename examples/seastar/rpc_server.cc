@@ -39,7 +39,6 @@ namespace bpo = boost::program_options;
 using namespace std::chrono_literals;
 
 static logger lg("rpc_server");
-static mycomp mc;
 
 static void register_rpc_handlers(rpc::protocol<serializer>& myrpc);
 
@@ -63,7 +62,7 @@ int main(int ac, char** av) {
 
         rpc::server_options so;
         if (compress) {
-            so.compressor_factory = &mc;
+            so.compressor_factory = compressor_factory();
         }
 
         fmt::print("Seastar RPC server listening on port {} ...\n", port);

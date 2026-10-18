@@ -1,4 +1,7 @@
-# TODO: batch stress test
+# Batch stress test
+
+TL;DR: not a bug. Rewrite the batch review's randomized stress test, which
+was never committed, as an `#[ignore]` test so it stays runnable.
 
 Status: deferred minor from the client batch review (branch `ivan/batching`).
 

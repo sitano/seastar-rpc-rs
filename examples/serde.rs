@@ -9,7 +9,7 @@
 //! Needs the C++ reference server from `examples/seastar` (`make seastar-server`).
 //!
 //! ```text
-//! cargo run --example serde -- [--server host:port] [--timeout ms] [X Y]
+//! cargo run --example serde -- [--server host:port] [--compress lz4|lz4_fragmented] [--timeout ms] [X Y]
 //! cargo run --example serde -- 3 4        # Sum { x: 3, y: 4 } -> 7
 //! ```
 
@@ -21,7 +21,9 @@ use seastar_rpc::rpc::{Client, Decode, DecodeError, Encode, Verb};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-const USAGE: &str = "usage: serde [--server host:port] [--timeout ms] [X Y]\n";
+mod common;
+
+const USAGE: &str = "usage: serde [--server host:port] [--compress lz4|lz4_fragmented[,...]] [--timeout ms] [X Y]\n";
 
 /// `int (sum)`: returns `x + y`.
 const SUM: Verb = 17;
@@ -61,7 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = "127.0.0.1:10000".to_string();
     let mut timeout = Duration::from_millis(5000);
     let mut rest = Vec::new();
-    let mut args = std::env::args().skip(1);
+    let (args, compression) = common::args()?;
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--server" => server = args.next().ok_or(USAGE)?,
@@ -76,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let client = Client::builder()
+        .offer_compression(compression)
         .connect_timeout(timeout)
         .default_timeout(timeout)
         .connect(server)
