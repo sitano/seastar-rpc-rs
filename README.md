@@ -7,7 +7,7 @@
 Seastar RPC async Rust server/client.
 
 Status: early. The client side works against the C++ Seastar reference
-server; the server side, compression and streaming are not implemented yet.
+server; the server side and streaming are not implemented yet.
 See [Features](#features).
 
 - [Features](#features)
@@ -27,6 +27,7 @@ See [Features](#features).
 | Transport | tokio TCP (`connect`), or any `AsyncRead` + `AsyncWrite` pair (`handshake`) |
 | Negotiation | `SSTARRPC` handshake; `TIMEOUT`, `HANDLER_DURATION` and isolation cookie offered; `CONNECTION_ID` read |
 | Calls | Typed `call::<Req, Rep>`, raw payloads `call_raw`, many concurrent calls pipelined on one connection |
+| Compression | `offer_compression`: `COMPRESS` with `LZ4` and `LZ4_FRAGMENTED`, applied below the raw layer; warm compressed sends and receives allocate nothing per frame |
 | Batches | `Batch` / `call_many`: requests written back to back and flushed together, replies in push order, no allocation per send once warm |
 | Deadlines | Per call or client default; sent to the server when `TIMEOUT` is negotiated |
 | No-wait verbs | `no_wait()`, `no_wait_send()`, `no_wait_recv()` |
@@ -40,7 +41,7 @@ See [Features](#features).
 | Area | Status |
 |---|---|
 | Server | Codecs decode both directions, but there is no server/dispatcher yet |
-| Compression | `COMPRESS` (LZ4, LZ4_FRAGMENTED) is not offered; a server enabling it anyway is rejected |
+| Custom compressors | Only the built-in `LZ4` / `LZ4_FRAGMENTED`; no pluggable compressor and no out-of-band empty frames sent (received ones are skipped) |
 | Streaming | Sink/source streams (`STREAM_PARENT`, stream frames) |
 | Connection management | Reconnect, connection pools, load balancing |
 | TLS | Not built in; bring your own stream through `handshake` |
@@ -48,7 +49,7 @@ See [Features](#features).
 | Handler duration | Negotiated and parsed, visible on the raw layer only, not exposed by `Client` |
 | Transactional batches | Out of scope: a batch is contiguous on the wire, not all-or-nothing on the server |
 
-Known batch-related follow-ups are tracked in [`docs/TODO_*.md`](docs/).
+Known follow-ups are tracked in [`docs/`](docs/) as `{KIND}_{COMPONENT}_P{N}_{name}.md` files.
 
 ## Quick start
 

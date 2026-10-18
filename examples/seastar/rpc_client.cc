@@ -44,7 +44,6 @@ future<> dispatch_verb(
         int verb, const std::vector<std::string>& args, std::chrono::milliseconds timeout);
 }
 
-static mycomp mc;
 static logger lg("rpc_demo");
 
 int main(int ac, char** av) {
@@ -74,7 +73,7 @@ int main(int ac, char** av) {
 
         rpc::client_options co;
         if (compress) {
-            co.compressor_factory = &mc;
+            co.compressor_factory = compressor_factory();
         }
 
         auto myrpc = rpc::protocol<serializer>(serializer{});
