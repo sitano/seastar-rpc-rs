@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use seastar_rpc::rpc::codec::exception::RemoteException;
 use seastar_rpc::rpc::codec::serialize::to_payload;
-use seastar_rpc::rpc::{CallOptions, Client, Error, NO_WAIT, with_timeout};
+use seastar_rpc::rpc::{CallOptions, Client, ConnectionId, Error, NO_WAIT, with_timeout};
 
 use crate::server::{ADD, FIRE, accepting, add_server, serve};
 
@@ -19,7 +19,7 @@ async fn negotiates_and_calls() {
     })
     .await;
     let client = Client::builder().connect(addr).await.unwrap();
-    assert_eq!(client.connection_id(), Some(1 << 16));
+    assert_eq!(client.connection_id(), Some(ConnectionId(1 << 16)));
     assert_eq!(client.call::<_, i32>(ADD, (3, 4)).await.unwrap(), 7);
 }
 

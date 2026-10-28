@@ -5,12 +5,14 @@ mod batch;
 mod builder;
 mod dispatch;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
@@ -23,6 +25,7 @@ use crate::rpc::codec::negotiation::Features;
 use crate::rpc::codec::serialize::{Decode, Encode, from_payload, to_payload};
 use crate::rpc::error::{Error, Result};
 use crate::rpc::raw::RawConnection;
+use crate::rpc::stream::{ConnectionId, StreamConnection};
 use crate::rpc::verb::Verb;
 
 /// Per-call options.
@@ -45,6 +48,7 @@ pub struct CallOptions {
 
 impl CallOptions {
     /// Sets the timeout for this call. Overrides the client's default timeout if specified.
+    #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
@@ -52,17 +56,20 @@ impl CallOptions {
 
     /// Fire and forget: sets both `no_wait_send` and `no_wait_recv`, so the
     /// call never blocks.
+    #[must_use]
     pub fn no_wait(self) -> Self {
         self.no_wait_send().no_wait_recv()
     }
 
     /// Sets `no_wait_send`.
+    #[must_use]
     pub fn no_wait_send(mut self) -> Self {
         self.no_wait_send = true;
         self
     }
 
     /// Sets `no_wait_recv`.
+    #[must_use]
     pub fn no_wait_recv(mut self) -> Self {
         self.no_wait_recv = true;
         self
@@ -77,6 +84,7 @@ pub const NO_WAIT: CallOptions = CallOptions {
 };
 
 /// Predefined `CallOptions` with a custom timeout.
+#[must_use]
 pub fn with_timeout(timeout: Duration) -> CallOptions {
     CallOptions::default().timeout(timeout)
 }
@@ -94,6 +102,9 @@ struct Inner {
     next_id: AtomicI64,
     shared: Arc<Shared>,
     tx: mpsc::Sender<Outgoing>,
+    /// Where and how to open streams; `None` for a client made by
+    /// `handshake`, whose transport we can't reopen.
+    stream_from: Option<(SocketAddr, ClientBuilder)>,
 }
 
 impl std::fmt::Debug for Client {
@@ -106,6 +117,7 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    #[must_use]
     pub fn builder() -> ClientBuilder {
         ClientBuilder::new()
     }
@@ -114,6 +126,7 @@ impl Client {
         raw: RawConnection<R, W>,
         queue: usize,
         default_timeout: Option<Duration>,
+        stream_from: Option<(SocketAddr, ClientBuilder)>,
     ) -> Client
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -139,6 +152,7 @@ impl Client {
                 next_id: AtomicI64::new(1),
                 features,
                 default_timeout,
+                stream_from,
             }),
         }
     }
@@ -170,6 +184,13 @@ impl Client {
     /// let sums: Vec<i32> = try_join_all((0..10).map(|i| client.call(ADD, (i, 1)))).await?;
     /// # Ok(()) }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] when the deadline passes, [`Error::Remote`] or
+    /// [`Error::UnknownVerb`] if the server rejects the call, a decode error
+    /// for a reply that doesn't match `Rep`, or [`Error::Closed`] once the
+    /// connection is gone.
     pub async fn call<Req: Encode, Rep: Decode>(&self, verb: Verb, request: Req) -> Result<Rep> {
         self.call_with(verb, request, CallOptions::default()).await
     }
@@ -194,6 +215,14 @@ impl Client {
     /// client.call_with::<_, ()>(NO_WAIT_VERB, (), NO_WAIT).await?;
     /// # Ok(()) }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] when the deadline passes, [`Error::Remote`] or
+    /// [`Error::UnknownVerb`] if the server rejects the call, a decode error
+    /// for a reply that doesn't match `Rep`, or [`Error::Closed`] once the
+    /// connection is gone.
+    /// [`Error::QueueFull`] if the queue is full and `no_wait_send` is set.
     pub async fn call_with<Req: Encode, Rep: Decode>(
         &self,
         verb: Verb,
@@ -262,6 +291,7 @@ impl Client {
     /// }
     /// # Ok(()) }
     /// ```
+    #[must_use]
     pub fn batch(&self) -> Batch {
         Batch::new(self.inner.clone())
     }
@@ -278,6 +308,12 @@ impl Client {
     /// }
     /// # Ok(()) }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// The outer `Err` means nothing was sent: the connection is closed, or
+    /// the queue is full and the call asked not to wait. Once sent, each
+    /// reply carries its own result, as for [`call`](Self::call).
     pub async fn call_many<Req: Encode, Rep: Decode>(
         &self,
         verb: Verb,
@@ -288,6 +324,10 @@ impl Client {
     }
 
     /// [`call_many`](Self::call_many) with options for the whole batch.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`call_many`](Self::call_many).
     pub async fn call_many_with<Req: Encode, Rep: Decode>(
         &self,
         verb: Verb,
@@ -330,16 +370,43 @@ impl Client {
     }
 
     /// Features the server accepted during negotiation.
+    #[must_use]
     pub fn features(&self) -> &Features {
         &self.inner.features
     }
 
     /// Server-assigned id of this connection, if the server sent one.
-    pub fn connection_id(&self) -> Option<u64> {
-        self.inner.features.connection_id
+    #[must_use]
+    pub fn connection_id(&self) -> Option<ConnectionId> {
+        self.inner.features.connection_id.map(ConnectionId)
+    }
+
+    /// Open a stream belonging to this connection: a new TCP connection to
+    /// the same server, negotiated with the same builder settings. See
+    /// [`stream`](crate::rpc::stream) for how to pass it to a verb and close
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsupported`] if the server sent no connection id
+    /// (streaming is not configured there). [`Error::InvalidState`] if this
+    /// client was made by `handshake`; use
+    /// [`ClientBuilder::handshake_stream`] for it.
+    /// Otherwise the errors of [`ClientBuilder::connect_stream`].
+    pub async fn open_stream(&self) -> Result<StreamConnection<OwnedReadHalf, OwnedWriteHalf>> {
+        let parent = self
+            .connection_id()
+            .ok_or(Error::Unsupported("streaming (no CONNECTION_ID)"))?;
+
+        let (addr, builder) = self.inner.stream_from.clone().ok_or(Error::InvalidState(
+            "client was not opened with connect(); use ClientBuilder::handshake_stream",
+        ))?;
+
+        builder.connect_stream(addr, parent).await
     }
 
     /// Whether the connection has failed or been closed by the peer.
+    #[must_use]
     pub fn is_closed(&self) -> bool {
         self.inner.shared.check_open().is_err()
     }

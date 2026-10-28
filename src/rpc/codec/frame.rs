@@ -46,7 +46,7 @@ impl FrameLayout {
         if self.handler_duration { 16 } else { 12 }
     }
 
-    fn check_len(&self, len: usize) -> Result<()> {
+    pub(crate) fn check_len(&self, len: usize) -> Result<()> {
         if len > self.max_frame_size {
             return Err(Error::Protocol(format!(
                 "frame payload of {len} bytes exceeds limit of {} bytes",

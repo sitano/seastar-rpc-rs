@@ -35,8 +35,8 @@ test: ## Run unit and fake-server tests
 test-interop: ## Run interop tests against the C++ server at SEASTAR_RPC_ADDR
 	SEASTAR_RPC_ADDR=$(SEASTAR_RPC_ADDR) $(CARGO) test --test interop -- --ignored
 
-bench: ## Run call benchmarks against the C++ server at SEASTAR_RPC_ADDR
-	SEASTAR_RPC_ADDR=$(SEASTAR_RPC_ADDR) $(CARGO) bench --bench call
+bench: ## Run call and stream benchmarks against the C++ server at SEASTAR_RPC_ADDR
+	SEASTAR_RPC_ADDR=$(SEASTAR_RPC_ADDR) $(CARGO) bench --bench call --bench stream
 
 fmt: ## Format the code
 	$(CARGO) fmt --all
@@ -56,8 +56,8 @@ doc: ## Build the docs
 example: ## Run the client example, e.g. make example ARGS="2 3 4"
 	$(CARGO) run --example client -- --server $(SEASTAR_RPC_ADDR) $(ARGS)
 
-examples: ## Run the calls, concurrent, batches, raw and serde examples against the C++ server
-	for e in calls concurrent batches raw; do $(CARGO) run --release --example $$e -- $(SEASTAR_RPC_ADDR) || exit 1; done
+examples: ## Run the calls, concurrent, batches, raw, streaming and serde examples against the C++ server
+	for e in calls concurrent batches raw streaming; do $(CARGO) run --release --example $$e -- $(SEASTAR_RPC_ADDR) || exit 1; done
 	$(CARGO) run --release --example serde -- --server $(SEASTAR_RPC_ADDR)
 
 dhat: ## Run the client example with heap profiling (writes dhat-heap.json)

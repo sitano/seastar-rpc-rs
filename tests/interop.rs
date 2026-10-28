@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use seastar_rpc::rpc::{CallOptions, Client, Compression, Error, with_timeout};
+use seastar_rpc::rpc::{CallOptions, Client, Compression, Error, StreamId, with_timeout};
 
 // Verb ids and signatures follow examples/seastar/rpc_server.cc.
 // C++ `int` = i32, `long` = i64 on Linux.
@@ -34,14 +34,14 @@ async fn client_compressed(compression: Option<Compression>) -> Client {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "needs the C++ rpc_server (make seastar-server)"]
 async fn negotiation() {
     let c = client().await;
     assert!(c.features().timeout, "{:?}", c.features());
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "needs the C++ rpc_server (make seastar-server)"]
 async fn simple_verbs() {
     let c = client().await;
     c.call::<(i32,), ()>(1, (1,)).await.unwrap();
@@ -67,7 +67,7 @@ async fn simple_verbs() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "needs the C++ rpc_server (make seastar-server)"]
 async fn trailing_optional() {
     let c = client().await;
     assert_eq!(
@@ -85,7 +85,7 @@ async fn trailing_optional() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "needs the C++ rpc_server (make seastar-server)"]
 async fn exceptions() {
     let c = client().await;
     let err = c.call::<(), ()>(4, ()).await.unwrap_err();
@@ -103,7 +103,7 @@ async fn exceptions() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "needs the C++ rpc_server (make seastar-server)"]
 async fn timeout() {
     let c = client().await;
     let err = c
@@ -115,7 +115,7 @@ async fn timeout() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "needs the C++ rpc_server (make seastar-server)"]
 async fn concurrent() {
     let c = client().await;
     let calls: Vec<_> = (0..100)
@@ -131,7 +131,7 @@ async fn concurrent() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "needs the C++ rpc_server (make seastar-server)"]
 async fn compressed_calls() {
     for algo in [Compression::Lz4, Compression::Lz4Fragmented] {
         let c = client_compressed(Some(algo)).await;
@@ -157,5 +157,93 @@ async fn compressed_calls() {
 
         let err = c.call::<(), ()>(4, ()).await.unwrap_err();
         assert!(matches!(err, Error::Remote(_)), "{err:?}");
+    }
+}
+
+/// Verb 18, `rpc::sink<int> (rpc::source<int>)`, writes back every int
+/// doubled and closes after our EOS.
+async fn double_stream(c: &Client) {
+    let mut stream = c.open_stream().await.unwrap();
+    let back: StreamId = c.call(18, stream.id).await.unwrap();
+    assert_eq!(back, stream.id);
+
+    for i in 1..=100i32 {
+        stream.sink.send_item(&i).await.unwrap();
+    }
+    stream.sink.close().await.unwrap();
+
+    let mut got = Vec::new();
+    while let Some(x) = stream.source.recv_item::<i32>().await.unwrap() {
+        got.push(x);
+    }
+    assert_eq!(got, (1..=100).map(|i| i * 2).collect::<Vec<_>>());
+
+    stream.finish().await.unwrap();
+}
+
+/// Verb 20, `void (rpc::source<int>)`, only reads: the server sends no EOS
+/// and closes the stream after reading ours, and `finish` returns once it
+/// has. Whether the server saw every int shows in its log as
+/// `test20 sum 49995000`; closing without `finish` loses the tail of it.
+#[tokio::test]
+#[ignore = "needs the C++ rpc_server (make seastar-server)"]
+async fn stream_client_to_server_only() {
+    let c = client().await;
+    let mut stream = c.open_stream().await.unwrap();
+    c.call::<_, ()>(20, stream.id).await.unwrap();
+
+    for i in 0..10_000i32 {
+        stream.sink.feed_item(&i).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(5), stream.finish())
+        .await
+        .expect("server did not close the stream")
+        .unwrap();
+
+    // The parent connection still serves calls.
+    assert_eq!(c.call::<(i32, i32), i32>(2, (3, 4)).await.unwrap(), 7);
+}
+
+/// Verb 21, `rpc::sink<int> (int n, rpc::source<int>)`, only writes and
+/// never reads its source, so the server keeps the stream until we drop it.
+#[tokio::test]
+#[ignore = "needs the C++ rpc_server (make seastar-server)"]
+async fn stream_server_to_client_only() {
+    let c = client().await;
+    let mut stream = c.open_stream().await.unwrap();
+    let back: StreamId = c.call(21, (5i32, stream.id)).await.unwrap();
+    assert_eq!(back, stream.id);
+
+    let mut got = Vec::new();
+    while let Some(x) = stream.source.recv_item::<i32>().await.unwrap() {
+        got.push(x);
+    }
+    assert_eq!(got, [0, 1, 2, 3, 4]);
+    drop(stream);
+
+    assert_eq!(c.call::<(i32, i32), i32>(2, (3, 4)).await.unwrap(), 7);
+}
+
+#[tokio::test]
+#[ignore = "needs the C++ rpc_server (make seastar-server)"]
+async fn streaming() {
+    let c = client().await;
+    assert!(
+        c.connection_id().is_some(),
+        "server has no streaming domain"
+    );
+
+    // Several streams at once, each on its own connection.
+    futures_util::future::join_all((0..4).map(|_| double_stream(&c))).await;
+
+    // The parent connection still serves calls.
+    assert_eq!(c.call::<(i32, i32), i32>(2, (3, 4)).await.unwrap(), 7);
+}
+
+#[tokio::test]
+#[ignore = "needs the C++ rpc_server (make seastar-server)"]
+async fn compressed_streaming() {
+    for algo in [Compression::Lz4, Compression::Lz4Fragmented] {
+        double_stream(&client_compressed(Some(algo)).await).await;
     }
 }
