@@ -7,7 +7,7 @@
 Seastar RPC async Rust server/client.
 
 Status: early. The client side works against the C++ Seastar reference
-server; the server side and streaming are not implemented yet.
+server; the server side is not implemented yet.
 See [Features](#features).
 
 - [Features](#features)
@@ -33,6 +33,7 @@ See [Features](#features).
 | No-wait verbs | `no_wait()`, `no_wait_send()`, `no_wait_recv()` |
 | Errors | Remote exceptions (user, unknown verb, unknown kind), timeouts, queue full, closed connection, decode errors |
 | Serialization | `Encode` / `Decode` for integers, floats, `bool`, strings, byte buffers, tuples, trailing `Option`; implement them for your own types |
+| Streaming | `open_stream`: `rpc::sink` / `rpc::source` streams on their own connection (`STREAM_PARENT`), passed to verbs as a `StreamId`, both directions, EOS close, compressed like calls |
 | Raw layer | `Sink` of request frames with caller-chosen `msg_id`s and a `Stream` of every response, no pending-call table |
 | Limits | Connect timeout, max frame size, bounded request queue |
 
@@ -42,7 +43,7 @@ See [Features](#features).
 |---|---|
 | Server | Codecs decode both directions, but there is no server/dispatcher yet |
 | Custom compressors | Only the built-in `LZ4` / `LZ4_FRAGMENTED`; no pluggable compressor and no out-of-band empty frames sent (received ones are skipped) |
-| Streaming | Sink/source streams (`STREAM_PARENT`, stream frames) |
+| Stream abort on close | Closing a `Client` doesn't abort its open streams; the server aborts them, which ends their sources with `Closed` |
 | Connection management | Reconnect, connection pools, load balancing |
 | TLS | Not built in; bring your own stream through `handshake` |
 | Tower middleware | No `tower::Service` impl for `Client`, so timeout, retry, rate-limit and load-balance layers can't be stacked on calls |
@@ -155,10 +156,33 @@ let RawConnection { sender: mut tx, receiver: rx, features, .. } =
 tx.send_request(1, ADD, payload, None).await?;
 ```
 
+### Streams
+
+```rust
+use seastar_rpc::rpc::StreamId;
+
+// `rpc::sink<int> (rpc::source<int>)`
+const DOUBLE: Verb = 18;
+
+// A new TCP connection to the same server, tied to `client`'s connection.
+let mut stream = client.open_stream().await?;
+let back: StreamId = client.call(DOUBLE, stream.id).await?;
+
+stream.sink.send_item(&21i32).await?;
+stream.sink.close().await?; // sends EOS, keeps the connection open
+while let Some(x) = stream.source.recv_item::<i32>().await? {
+    println!("{x}");
+}
+```
+
+Each stream is its own connection, which carries both directions. Close
+the sink and read the source to its end before dropping the stream;
+dropping it earlier aborts it on the server.
+
 ### Runnable examples
 
 [`examples/`](examples/) has programs that run against the C++ server
-(`make seastar-server` first, then `make examples` runs the first five):
+(`make seastar-server` first, then `make examples` runs the first six):
 
 | Example | Shows |
 |---|---|
@@ -166,6 +190,7 @@ tx.send_request(1, ADD, payload, None).await?;
 | [`concurrent.rs`](examples/concurrent.rs) | Sequential loop vs `try_join_all`, overlapping slow calls with `try_join!`, spawned tasks sharing a cloned `Client`, cancellation with `select!` |
 | [`batches.rs`](examples/batches.rs) | A reused `Batch` with mixed verbs, per-item errors, `call_many` in a loop, `call_many_with` with a deadline and no-wait, batches from several tasks |
 | [`raw.rs`](examples/raw.rs) | A raw connection with no client: pipelines `count` `add` calls with caller-chosen `msg_id`s through `send_all` and checks every reply while sending |
+| [`streaming.rs`](examples/streaming.rs) | A stream handed to a verb that returns a sink on it: writes ints and reads them back doubled, both directions at once |
 | [`serde.rs`](examples/serde.rs) | `Encode` / `Decode` for any serde type through a bincode wrapper, in single calls and `call_many` |
 | [`client.rs`](examples/client.rs) | Command-line client for one verb (`make example ARGS="2 3 4"`) |
 
@@ -188,6 +213,10 @@ Layers, each usable on its own:
 - `raw` — `Client::builder().connect_raw(addr)` gives a `Sink` of request
   frames with caller-chosen `msg_id`s and a `Stream` of every response,
   with no pending-call table.
+- `stream` — `client.open_stream()` gives a `StreamSink` and a
+  `StreamSource` on a new connection, plus the `StreamId` a call passes
+  for `rpc::sink` / `rpc::source`. No background task: each half is used
+  directly.
 - `Client` — multiplexes concurrent calls by `msg_id` over one connection,
   with one writer task (coalesces queued frames into one flush) and one
   reader task (matches replies to callers); `Batch` sends a group of
@@ -207,11 +236,24 @@ Benchmarks run against the C++ reference server (start it with
 `make seastar-server` first) and are skipped if it can't be reached:
 
 ```sh
-SEASTAR_RPC_ADDR=127.0.0.1:10000 cargo bench --bench call
+SEASTAR_RPC_ADDR=127.0.0.1:10000 cargo bench --bench call --bench stream
 ```
 
 They measure single-call latency, pipelined calls and batches at several
-depths.
+depths, and for streams the open/close cost and items sent over one stream.
+
+Rough numbers for one CPU core on the server: one connection, which Seastar
+serves on one shard, a single-threaded client, release builds, loopback,
+4-byte payloads. Details in
+[`docs/benchmarks.md`](docs/benchmarks.md).
+
+| Workload | Rate |
+|----------|------|
+| One call at a time | 5.3 µs, 189k calls/s |
+| Pipelined, 16 / 128 in flight | 1.17M / 1.70M calls/s |
+| Batch of 16 / 128 | 1.50M / 2.73M calls/s |
+| Stream, `send_item` (flush per item) | 1.0M items/s |
+| Stream, flush every 16+ items | 2.5M items/s |
 
 ## Documentation
 
@@ -221,6 +263,8 @@ depths.
   the same, from the server side.
 - [`docs/client-api-examples.md`](docs/client-api-examples.md) — design
   notes for the Rust client API.
+- [`docs/benchmarks.md`](docs/benchmarks.md) — rough benchmark results
+  for one server core.
 - [`docs/leaked-send-futures.md`](docs/leaked-send-futures.md) — what
   leaking a send future costs, and why a `Batch` panics afterwards.
 - [`examples/seastar/`](examples/seastar/) — C++ Seastar RPC echo server and

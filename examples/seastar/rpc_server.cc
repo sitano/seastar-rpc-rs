@@ -25,6 +25,7 @@
 #include <iostream>
 #include <seastar/core/app-template.hh>
 #include <seastar/core/condition-variable.hh>
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/signal.hh>
 #include <seastar/core/sleep.hh>
@@ -61,6 +62,9 @@ int main(int ac, char** av) {
         limits.max_memory = 10'000'000;
 
         rpc::server_options so;
+        // Lets clients open streams (verbs 18, 19); also makes the server send
+        // CONNECTION_ID on every connection.
+        so.streaming_domain = rpc::streaming_domain_type(1);
         if (compress) {
             so.compressor_factory = compressor_factory();
         }
@@ -92,6 +96,32 @@ int main(int ac, char** av) {
 
         co_return rc;
     });
+}
+
+// Verbs 18 and 19: write back every int from `source` doubled into `sink`,
+// then close `sink`. A coroutine function, so the arguments live in its frame.
+static future<> double_stream(int verb, rpc::source<int> source, rpc::sink<int> sink, bool verbose) {
+    std::exception_ptr ex;
+    int n = 0;
+    try {
+        while (auto data = co_await source()) {
+            co_await sink(std::get<0>(*data) * 2);
+            n++;
+        }
+    } catch (...) {
+        ex = std::current_exception();
+    }
+    // A sink must be closed even after an error.
+    try {
+        co_await sink.close();
+    } catch (...) {
+        ex = ex ? ex : std::current_exception();
+    }
+    if (ex) {
+        fmt::print("test{:d} stream failed after {:d} items: {}\n", verb, n, ex);
+    } else if (verbose) {
+        fmt::print("test{:d} doubled {:d} items\n", verb, n);
+    }
 }
 
 static void register_rpc_handlers(rpc::protocol<serializer>& myrpc) {
@@ -146,4 +176,18 @@ static void register_rpc_handlers(rpc::protocol<serializer>& myrpc) {
     // Same as verb 2 but silent, so benchmarks aren't bound by stdout.
     myrpc.register_handler(16, [](int a, int b){ return make_ready_future<int>(a+b); });
     myrpc.register_handler(17, [](sum s){ fmt::print("test17 got {{{:d}, {:d}}}\n", s.x, s.y); return s.x + s.y; });
+    // Stream: reply with a sink on the same stream, write back every int
+    // doubled, close our direction after the client's EOS.
+    myrpc.register_handler(18, [](rpc::source<int> source) {
+        auto sink = source.make_sink<serializer, int>();
+        (void)double_stream(18, source, sink, true);
+        return sink;
+    });
+    // Same as verb 18 but silent on success, so benchmarks opening many
+    // streams aren't bound by stdout.
+    myrpc.register_handler(19, [](rpc::source<int> source) {
+        auto sink = source.make_sink<serializer, int>();
+        (void)double_stream(19, source, sink, false);
+        return sink;
+    });
 }

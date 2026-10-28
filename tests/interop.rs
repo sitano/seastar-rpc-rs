@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use seastar_rpc::rpc::{CallOptions, Client, Compression, Error, with_timeout};
+use seastar_rpc::rpc::{CallOptions, Client, Compression, Error, StreamId, with_timeout};
 
 // Verb ids and signatures follow examples/seastar/rpc_server.cc.
 // C++ `int` = i32, `long` = i64 on Linux.
@@ -157,5 +157,48 @@ async fn compressed_calls() {
 
         let err = c.call::<(), ()>(4, ()).await.unwrap_err();
         assert!(matches!(err, Error::Remote(_)), "{err:?}");
+    }
+}
+
+/// Verb 18, `rpc::sink<int> (rpc::source<int>)`, writes back every int
+/// doubled and closes after our EOS.
+async fn double_stream(c: &Client) {
+    let mut stream = c.open_stream().await.unwrap();
+    let back: StreamId = c.call(18, stream.id).await.unwrap();
+    assert_eq!(back, stream.id);
+
+    for i in 1..=100i32 {
+        stream.sink.send_item(&i).await.unwrap();
+    }
+    stream.sink.close().await.unwrap();
+
+    let mut got = Vec::new();
+    while let Some(x) = stream.source.recv_item::<i32>().await.unwrap() {
+        got.push(x);
+    }
+    assert_eq!(got, (1..=100).map(|i| i * 2).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+#[ignore]
+async fn streaming() {
+    let c = client().await;
+    assert!(
+        c.connection_id().is_some(),
+        "server has no streaming domain"
+    );
+
+    // Several streams at once, each on its own connection.
+    futures_util::future::join_all((0..4).map(|_| double_stream(&c))).await;
+
+    // The parent connection still serves calls.
+    assert_eq!(c.call::<(i32, i32), i32>(2, (3, 4)).await.unwrap(), 7);
+}
+
+#[tokio::test]
+#[ignore]
+async fn compressed_streaming() {
+    for algo in [Compression::Lz4, Compression::Lz4Fragmented] {
+        double_stream(&client_compressed(Some(algo)).await).await;
     }
 }

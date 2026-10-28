@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rust (edition 2024, MSRV 1.85) client/server for the C++ Seastar RPC wire protocol, crate `seastar-rpc`. Only the client side exists; server and streaming are not implemented yet (see README "Not supported yet"). Repowise tooling notes live in `.claude/CLAUDE.md`.
+Rust (edition 2024, MSRV 1.85) client/server for the C++ Seastar RPC wire protocol, crate `seastar-rpc`. Only the client side exists; the server is not implemented yet (see README "Not supported yet"). Repowise tooling notes live in `.claude/CLAUDE.md`.
 
 ## Commands
 
@@ -16,7 +16,7 @@ Rust (edition 2024, MSRV 1.85) client/server for the C++ Seastar RPC wire protoc
 Needs the C++ reference server (`make seastar-server`, listens on `127.0.0.1:10000`; requires a Seastar build, see `examples/seastar/HACKING.md`, default `~/Projects/seastar/build/debug`):
 
 - `make test-interop` — `tests/interop.rs`, all `#[ignore]`d and run with `--ignored`, `SEASTAR_RPC_ADDR` picks the server
-- `make bench` — criterion `benches/call.rs`, skips if the server is unreachable
+- `make bench` — criterion `benches/call.rs` and `benches/stream.rs`, skip if the server is unreachable
 - `make examples`, `make example ARGS="2 3 4"`
 - `make dhat` — heap profile of the client example (`--cfg dhat_heap`)
 
@@ -26,6 +26,7 @@ Three layers under `src/rpc/`, each usable on its own:
 
 - `codec/` — role-agnostic wire format: every codec both encodes and decodes, so the same code serves a client and (future) server. `negotiation.rs` (`SSTARRPC` handshake, `Features`), `frame.rs` (request/response frames; header layout depends on negotiated features, captured once in `FrameLayout`), `compress.rs` (`COMPRESS` envelope, LZ4 / LZ4_FRAGMENTED; `CompressionCodec<C>` wraps a frame codec and passes through when off), `exception.rs` (negative `msg_id` responses), `serialize.rs` (`Encode`/`Decode`). Module docs cite sections of `docs/rpc-wire-protocol-client-guide.md` ("wire guide §N").
 - `raw.rs` — a negotiated connection as `RawSender` (`Sink<RequestFrame>`, caller picks `msg_id`) and `RawReceiver` (`Stream` of every response). No pending-call table.
+- `stream.rs` — `rpc::sink`/`rpc::source` streams (wire guide §9): each stream is its own TCP connection, negotiated with `STREAM_PARENT` and without `TIMEOUT`, carrying `codec/stream.rs` frames both ways. `StreamSink`/`StreamSource` wrap the halves directly, with no task. Opened by `ClientBuilder::connect_stream`/`handshake_stream` or `Client::open_stream` (which remembers the peer address and builder from `connect`).
 - `client/` — `Client` multiplexes calls over one raw connection. `dispatch.rs` runs separate writer and reader tasks (one task blocking on a write could deadlock against a peer blocked writing replies). Callers register a slot in a shared pending map before queueing; the reader completes it by `msg_id`. Slots hold the caller's waker, so a call allocates nothing per request. `batch.rs`: a `Batch` is one queue message whose frames are written contiguously and flushed together; its buffers are pooled and reused so a warm batch allocates nothing per send — `tests/batch_allocs.rs` asserts this with dhat (own binary because dhat replaces the global allocator).
 
 Things that aren't obvious from one file:
@@ -34,7 +35,8 @@ Things that aren't obvious from one file:
 - The verb table for the reference server is in `examples/seastar/HACKING.md`; `examples/seastar/rpc_server.cc` implements it. Adding a verb used by interop tests means editing the C++ server too.
 - Leaked (`mem::forget`) send futures permanently lose a queue slot; a leaked `Batch` panics on next use with `BATCH_LEAKED_PANIC`. Dropping/cancelling is always safe. See `docs/leaked-send-futures.md`.
 - `Batch::send` returning outer `Err` means nothing was queued and the requests are still in the batch; once queued each item has its own result.
-- `tests/fake_server/` builds a scripted in-process server (`server.rs`) from the crate's own codecs in the server direction — the place for deterministic client behaviour tests without C++. Tests are split by topic: `calls.rs`, `connection.rs`, `batch.rs`.
+- `StreamSink::close` sends EOS and flushes but must not shut the socket down: Seastar throws away a queued EOS it hasn't read yet if the connection ends (`_stream_queue.abort`). The connection ends when both halves are dropped.
+- `tests/fake_server/` builds a scripted in-process server (`server.rs`) from the crate's own codecs in the server direction — the place for deterministic client behaviour tests without C++. Tests are split by topic: `calls.rs`, `connection.rs`, `batch.rs`, `compression.rs`, `streaming.rs` (`serve_streaming` accepts a parent connection and then one stream connection).
 - Known follow-ups are tracked as `docs/{KIND}_{COMPONENT}_P{N}_{name}.md` files (excluded from the published crate); see the rules below.
 - API design rationale (builder + cheap-clone handle, actor-per-connection, `#[non_exhaustive]` public types, transport vs application errors): `docs/client-api-examples.md`.
 
