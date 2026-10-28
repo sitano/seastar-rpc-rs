@@ -451,10 +451,40 @@ for the API-level view; this is the wire-level view):
 Closing: a stream is closed by sending a stream frame with `len ==
 0xFFFFFFFF` (no payload) in that direction — this is a real frame on the
 wire, not a TCP-level shutdown (`sink_impl::close`, `rpc_impl.hh:900-903`
-writes `-1U` as the length). Both directions must be explicitly closed by
-the application; the underlying TCP connection for the stream is only torn
-down once both directions have signaled closed (`connection::stream_close`,
-`rpc.cc:548-573`).
+writes `-1U` as the length). Each side tears down its end of the stream's
+TCP connection (closes its write side, then stops the connection) only once
+both of its directions are closed (`connection::stream_check_twoway_closed`,
+`connection::stream_close`, `rpc.cc:548-573`):
+
+- its sink is closed when the application calls `sink::close()`, which
+  sends the EOS frame;
+- its source is closed when the application reads to the end, i.e. reads
+  the peer's EOS, or gets an error (`source_impl::operator()`,
+  `rpc_impl.hh:940-965`);
+- a direction that has no `rpc::sink`/`rpc::source` object on that side
+  counts as closed from the start: `_sink_closed` and `_source_closed`
+  default to `true` and only the `sink_impl`/`source_impl` constructors
+  clear them (`rpc.hh:305-306`).
+
+A server can only make a sink from a source (`source::make_sink`), so a
+server always holds a source for the stream; only its sink may be
+missing. That gives two one-direction cases:
+
+- **Client → server only** (the handler takes `rpc::source`, makes no
+  sink). The server closes the connection as soon as the handler has read
+  the EOS, without ever sending an EOS of its own; the client sees a plain
+  TCP EOF where it may have expected an EOS.
+- **Server → client only** (the handler makes a sink and never reads its
+  source). The server's source stays open, so the server keeps the
+  connection after closing its sink, even if the client sends EOS. It
+  goes away when the client closes its end.
+
+A side that writes must not close the connection right after its EOS
+either. When the peer's read loop hits EOF it aborts its stream queue
+(`_stream_queue.abort`, `rpc.cc:1062`), which throws away every message
+the application has not read yet, EOS included, and the reader gets
+`stream_closed`. Against the reference server, writing 10 000 ints, the
+EOS, and closing at once lost the tail of every stream.
 
 ## 10. End-to-end data flow diagrams
 

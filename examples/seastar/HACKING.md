@@ -119,6 +119,13 @@ The client also takes `--timeout <ms>` (default 5000).
 | 15 | `sstring (sstring)` | echoes the string back |
 | 16 | `int (int, int)` | returns `a + b` without printing (for benchmarks) |
 | 17 | `int (sum)` | returns `x + y` of a `struct sum { int x, y; }` (see `examples/serde.rs`) |
+| 18 | `rpc::sink<int> (rpc::source<int>)` | returns a sink on the same stream, writes back every int doubled, closes it after the client's EOS |
+| 19 | `rpc::sink<int> (rpc::source<int>)` | same as 18 without printing on success (for benchmarks) |
+| 20 | `void (rpc::source<int>)` | client → server only: sums the ints until EOS and prints the sum or the error; makes no sink, so it closes the stream after the client's EOS |
+| 21 | `rpc::sink<int> (int n, rpc::source<int>)` | server → client only: writes `0..n` and closes its sink; never reads the source |
+
+The server sets a streaming domain, so it sends `CONNECTION_ID` on every
+connection and accepts stream connections (verbs 18-21).
 
 ## Payload encoding
 

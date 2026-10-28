@@ -6,3 +6,4 @@ mod calls;
 mod compression;
 mod connection;
 mod server;
+mod streaming;

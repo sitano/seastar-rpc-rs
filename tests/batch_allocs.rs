@@ -3,7 +3,8 @@
 //! chunk, nor a send that starts with `push_raw`.
 //! `Batch::shrink` frees an outlier's memory, and the pool drops an outlier
 //! `call_many`'s arena. Compressed connections allocate nothing per send
-//! either.
+//! either. Warm streams allocate nothing per item, with `send_item` or with
+//! `feed_item` and one `flush`, compressed or not.
 //!
 //! Its own test binary: dhat replaces the global allocator, and its testing
 //! profiler admits one test at a time.
@@ -14,8 +15,9 @@ use seastar_rpc::rpc::codec::compress::{Compression, CompressionCodec};
 use seastar_rpc::rpc::codec::frame::{FrameLayout, RequestCodec, ResponseCodec, ResponseFrame};
 use seastar_rpc::rpc::codec::negotiation::{Features, read_negotiation, write_negotiation};
 use seastar_rpc::rpc::codec::serialize::{from_payload, to_payload};
-use seastar_rpc::rpc::{Batch, CallOptions, Client, Verb};
-use tokio::net::TcpListener;
+use seastar_rpc::rpc::{Batch, CallOptions, Client, StreamConnection, StreamId, Verb};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[global_allocator]
@@ -132,6 +134,14 @@ async fn warm_batches_do_not_allocate_per_send() {
     for algo in [Compression::Lz4, Compression::Lz4Fragmented] {
         compressed_sends(algo).await;
     }
+
+    for algo in [
+        None,
+        Some(Compression::Lz4),
+        Some(Compression::Lz4Fragmented),
+    ] {
+        stream_sends(algo).await;
+    }
 }
 
 async fn uncompressed_sends(client: &Client) {
@@ -223,5 +233,73 @@ async fn compressed_sends(algo: Compression) {
     assert!(
         per_send < 1.0,
         "{algo:?} call_many: {per_send} allocations per send of {N}"
+    );
+}
+
+type Stream = StreamConnection<OwnedReadHalf, OwnedWriteHalf>;
+
+/// A stream connection to a peer that echoes every message. No negotiation:
+/// both ends are built over a plain socket with the layout a stream gets.
+async fn echo_stream(compression: Option<Compression>) -> Stream {
+    let layout = FrameLayout::new(&Features::default(), 4 << 20);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        stream.set_nodelay(true).unwrap();
+        let (read, write) = stream.into_split();
+        let StreamConnection {
+            mut sink,
+            mut source,
+            ..
+        } = StreamConnection::new(read, write, layout, compression, StreamId(1));
+
+        while let Some(Ok(payload)) = source.next().await {
+            sink.send(payload).await.unwrap();
+        }
+    });
+
+    let stream = TcpStream::connect(addr).await.unwrap();
+    stream.set_nodelay(true).unwrap();
+    let (read, write) = stream.into_split();
+    StreamConnection::new(read, write, layout, compression, StreamId(1))
+}
+
+/// `N` items, each flushed, then `N` echoes read back. `N` 4-byte items fit
+/// in the socket buffers, so sending everything first can't deadlock.
+async fn stream_seq(s: &mut Stream) {
+    for i in 0..N {
+        s.sink.send_item(&i).await.unwrap();
+    }
+    for i in 0..N {
+        assert_eq!(s.source.recv_item::<i32>().await.unwrap(), Some(i));
+    }
+}
+
+/// `N` items under one flush, then `N` echoes read back.
+async fn stream_batch(s: &mut Stream) {
+    for i in 0..N {
+        s.sink.feed_item(&i).await.unwrap();
+    }
+    s.sink.flush().await.unwrap();
+    for i in 0..N {
+        assert_eq!(s.source.recv_item::<i32>().await.unwrap(), Some(i));
+    }
+}
+
+async fn stream_sends(algo: Option<Compression>) {
+    let mut s = echo_stream(algo).await;
+
+    let per_send = allocs_per_send(async || stream_seq(&mut s).await).await;
+    assert!(
+        per_send < 1.0,
+        "{algo:?} send_item: {per_send} allocations per {N} items"
+    );
+
+    let per_send = allocs_per_send(async || stream_batch(&mut s).await).await;
+    assert!(
+        per_send < 1.0,
+        "{algo:?} feed_item + flush: {per_send} allocations per {N} items"
     );
 }

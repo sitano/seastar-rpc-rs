@@ -49,6 +49,16 @@ pub enum Error {
     Protocol(String),
     #[error("decode error: {0}")]
     Decode(#[from] DecodeError),
+    /// The call is not valid in this state: a send on a closed stream sink,
+    /// or a stream asked of a client that can't reopen its transport. The
+    /// connection itself is fine.
+    #[error("invalid use: {0}")]
+    InvalidState(&'static str),
+    /// The server did not negotiate a feature this call needs, e.g. it sent
+    /// no `CONNECTION_ID`, so it can't take streams. The connection itself
+    /// is fine.
+    #[error("not supported by the server: {0}")]
+    Unsupported(&'static str),
 }
 
 /// Message of a `USER` exception: opaque bytes that are usually, but not

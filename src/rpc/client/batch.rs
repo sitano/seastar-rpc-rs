@@ -654,6 +654,7 @@ mod tests {
             next_id: AtomicI64::new(1),
             shared: Arc::new(Shared::default()),
             tx,
+            stream_from: None,
         };
 
         (Arc::new(inner), rx)
