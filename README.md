@@ -64,9 +64,11 @@ See [`HACKING.md`](examples/seastar/HACKING.md) for how Seastar is found.
    make seastar-server
    ```
 
-   This configures and builds `examples/seastar/build` with CMake + Ninja
-   and `clang++` (override with `make seastar-server CXX=g++`), then runs
-   `rpc_server`. Use `SEASTAR_RPC_ADDR=host:port` to change the port.
+   This configures and builds `examples/seastar/build/debug` with CMake +
+   Ninja and `clang++` (override with `make seastar-server CXX=g++`), then
+   runs `rpc_server`. Pick another Seastar build mode with
+   `SEASTAR_MODE=release` (or `dev`, `sanitize`, `fuzz`); `make seastar-<mode>`
+   only builds. Use `SEASTAR_RPC_ADDR=host:port` to change the port.
 
 2. In another terminal, call it:
 
