@@ -5,12 +5,14 @@ mod batch;
 mod builder;
 mod dispatch;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
@@ -23,6 +25,7 @@ use crate::rpc::codec::negotiation::Features;
 use crate::rpc::codec::serialize::{Decode, Encode, from_payload, to_payload};
 use crate::rpc::error::{Error, Result};
 use crate::rpc::raw::RawConnection;
+use crate::rpc::stream::StreamConnection;
 use crate::rpc::verb::Verb;
 
 /// Per-call options.
@@ -94,6 +97,9 @@ struct Inner {
     next_id: AtomicI64,
     shared: Arc<Shared>,
     tx: mpsc::Sender<Outgoing>,
+    /// Where and how to open streams; `None` for a client made by
+    /// `handshake`, whose transport we can't reopen.
+    stream_from: Option<(SocketAddr, ClientBuilder)>,
 }
 
 impl std::fmt::Debug for Client {
@@ -114,6 +120,7 @@ impl Client {
         raw: RawConnection<R, W>,
         queue: usize,
         default_timeout: Option<Duration>,
+        stream_from: Option<(SocketAddr, ClientBuilder)>,
     ) -> Client
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -139,6 +146,7 @@ impl Client {
                 next_id: AtomicI64::new(1),
                 features,
                 default_timeout,
+                stream_from,
             }),
         }
     }
@@ -337,6 +345,26 @@ impl Client {
     /// Server-assigned id of this connection, if the server sent one.
     pub fn connection_id(&self) -> Option<u64> {
         self.inner.features.connection_id
+    }
+
+    /// Open a stream belonging to this connection: a new TCP connection to
+    /// the same server, negotiated with the same builder settings. See
+    /// [`stream`](crate::rpc::stream) for how to pass it to a verb and close
+    /// it. Fails if the server sent no connection id (streaming is not
+    /// configured there) or if this client was made by `handshake`; use
+    /// [`ClientBuilder::handshake_stream`] for those.
+    pub async fn open_stream(&self) -> Result<StreamConnection<OwnedReadHalf, OwnedWriteHalf>> {
+        let parent = self.connection_id().ok_or_else(|| {
+            Error::Protocol("server does not support streaming (no CONNECTION_ID)".into())
+        })?;
+
+        let (addr, builder) = self.inner.stream_from.clone().ok_or_else(|| {
+            Error::Protocol(
+                "client was not opened with connect(); use ClientBuilder::handshake_stream".into(),
+            )
+        })?;
+
+        builder.connect_stream(addr, parent).await
     }
 
     /// Whether the connection has failed or been closed by the peer.

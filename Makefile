@@ -6,11 +6,16 @@ CXX = clang++
 # Interop tests, `bench`, `example` and `dhat` talk to the C++ server from examples/seastar.
 SEASTAR_RPC_ADDR ?= 127.0.0.1:10000
 SEASTAR_DIR := examples/seastar
-SEASTAR_BUILD := $(SEASTAR_DIR)/build
+# Seastar build mode: release, debug, dev, sanitize or fuzz. Each mode builds
+# into its own directory against ~/Projects/seastar/build/<mode> by default.
+SEASTAR_MODE ?= debug
+SEASTAR_MODES := release debug dev sanitize fuzz
+SEASTAR_BUILD := $(SEASTAR_DIR)/build/$(SEASTAR_MODE)
 
 .DEFAULT_GOAL := help
 .PHONY: help all build release test test-interop bench fmt fmt-check lint check doc \
-	example examples dhat seastar seastar-server clean clean-seastar ci
+	example examples dhat seastar seastar-server clean clean-seastar ci \
+	$(addprefix seastar-,$(SEASTAR_MODES))
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -30,8 +35,8 @@ test: ## Run unit and fake-server tests
 test-interop: ## Run interop tests against the C++ server at SEASTAR_RPC_ADDR
 	SEASTAR_RPC_ADDR=$(SEASTAR_RPC_ADDR) $(CARGO) test --test interop -- --ignored
 
-bench: ## Run call benchmarks against the C++ server at SEASTAR_RPC_ADDR
-	SEASTAR_RPC_ADDR=$(SEASTAR_RPC_ADDR) $(CARGO) bench --bench call
+bench: ## Run call and stream benchmarks against the C++ server at SEASTAR_RPC_ADDR
+	SEASTAR_RPC_ADDR=$(SEASTAR_RPC_ADDR) $(CARGO) bench --bench call --bench stream
 
 fmt: ## Format the code
 	$(CARGO) fmt --all
@@ -51,17 +56,21 @@ doc: ## Build the docs
 example: ## Run the client example, e.g. make example ARGS="2 3 4"
 	$(CARGO) run --example client -- --server $(SEASTAR_RPC_ADDR) $(ARGS)
 
-examples: ## Run the calls, concurrent, batches, raw and serde examples against the C++ server
-	for e in calls concurrent batches raw; do $(CARGO) run --release --example $$e -- $(SEASTAR_RPC_ADDR) || exit 1; done
+examples: ## Run the calls, concurrent, batches, raw, streaming and serde examples against the C++ server
+	for e in calls concurrent batches raw streaming; do $(CARGO) run --release --example $$e -- $(SEASTAR_RPC_ADDR) || exit 1; done
 	$(CARGO) run --release --example serde -- --server $(SEASTAR_RPC_ADDR)
 
 dhat: ## Run the client example with heap profiling (writes dhat-heap.json)
 	RUSTFLAGS="$$RUSTFLAGS --cfg dhat_heap" $(CARGO) run --example client -- --server $(SEASTAR_RPC_ADDR) $(ARGS)
 
-seastar: ## Build the C++ Seastar server and client (see examples/seastar/HACKING.md)
+seastar: ## Build the C++ Seastar server and client in SEASTAR_MODE (default debug), or use seastar-<mode>
 	cmake -S $(SEASTAR_DIR) -B $(SEASTAR_BUILD) -G Ninja \
-		-DCMAKE_CXX_COMPILER=$(CXX)
+		-DCMAKE_CXX_COMPILER=$(CXX) -DSEASTAR_MODE=$(SEASTAR_MODE)
 	cmake --build $(SEASTAR_BUILD)
+
+# seastar-release, seastar-debug, ...: listed explicitly so no pattern rule shadows seastar-server.
+$(addprefix seastar-,$(SEASTAR_MODES)):
+	$(MAKE) seastar SEASTAR_MODE=$(@:seastar-%=%)
 
 seastar-server: seastar ## Run the C++ Seastar server on the SEASTAR_RPC_ADDR port
 	$(SEASTAR_BUILD)/rpc_server --compress true --port $(lastword $(subst :, ,$(SEASTAR_RPC_ADDR)))
@@ -72,5 +81,5 @@ clean: ## Remove Rust build artifacts
 	$(CARGO) clean
 	rm -f dhat-heap.json
 
-clean-seastar: ## Remove the C++ Seastar build
-	rm -rf $(SEASTAR_BUILD)
+clean-seastar: ## Remove the C++ Seastar builds of all modes
+	rm -rf $(SEASTAR_DIR)/build

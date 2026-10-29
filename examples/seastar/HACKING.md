@@ -49,10 +49,14 @@ Seastar is looked up in this order:
    registers itself there, and build trees need the source-tree setup from
    step 1 or 3.
 
-3. **Local checkout fallback.** `~/Projects/seastar/build/<build type>`,
-   where `<build type>` is the lowercased `CMAKE_BUILD_TYPE` (default
-   `Debug`, so `build/debug`; `-DCMAKE_BUILD_TYPE=Release` uses
-   `build/release`).
+3. **Local checkout fallback.** `~/Projects/seastar/build/<mode>`, where
+   `<mode>` is `SEASTAR_MODE` (default `debug`; `-DSEASTAR_MODE=release`
+   uses `build/release`).
+
+`SEASTAR_MODE` is one of Seastar's build modes: `release`, `debug`, `dev`,
+`sanitize`, `fuzz`. It also sets `CMAKE_BUILD_TYPE` the way Seastar's
+`configure.py` does (`release` is `RelWithDebInfo`), unless you pass one.
+Build the examples in the same mode as the Seastar tree they use.
 
 Configure prints the Seastar it picked:
 
@@ -72,6 +76,10 @@ cmake --build build
 ```
 
 This produces `build/rpc_server` and `build/rpc_client`.
+
+From the repository root, `make seastar SEASTAR_MODE=release` (or
+`make seastar-release`, likewise for the other modes) builds into
+`examples/seastar/build/<mode>`.
 
 ## Run
 
@@ -111,6 +119,11 @@ The client also takes `--timeout <ms>` (default 5000).
 | 15 | `sstring (sstring)` | echoes the string back |
 | 16 | `int (int, int)` | returns `a + b` without printing (for benchmarks) |
 | 17 | `int (sum)` | returns `x + y` of a `struct sum { int x, y; }` (see `examples/serde.rs`) |
+| 18 | `rpc::sink<int> (rpc::source<int>)` | returns a sink on the same stream, writes back every int doubled, closes it after the client's EOS |
+| 19 | `rpc::sink<int> (rpc::source<int>)` | same as 18 without printing on success (for benchmarks) |
+
+The server sets a streaming domain, so it sends `CONNECTION_ID` on every
+connection and accepts stream connections (verbs 18, 19).
 
 ## Payload encoding
 

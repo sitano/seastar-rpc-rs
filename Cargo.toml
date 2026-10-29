@@ -1,6 +1,6 @@
 [package]
 name = "seastar-rpc"
-version = "0.2.1-rc.1"
+version = "0.2.1-rc.2"
 edition = "2024"
 rust-version = "1.85"
 description = "Seastar RPC async Rust server/client"
@@ -28,6 +28,10 @@ bincode = { version = "2", default-features = false, features = ["serde", "std"]
 
 [[bench]]
 name = "call"
+harness = false
+
+[[bench]]
+name = "stream"
 harness = false
 
 [lints.rust]

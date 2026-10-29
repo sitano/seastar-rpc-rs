@@ -6,6 +6,8 @@
 //!   Role-agnostic: each codec both encodes and decodes.
 //! - [`raw`]: a negotiated connection as a `Sink` of requests and a `Stream`
 //!   of every response, with caller-chosen `msg_id`s and no bookkeeping.
+//! - [`stream`]: `rpc::sink` / `rpc::source` streams, each on its own
+//!   connection opened from a parent [`Client`].
 //! - [`Client`]: multiplexes concurrent calls over one connection and
 //!   matches replies to callers. Calls name a [`Verb`] id and pick their
 //!   request/reply types, or pass raw payloads.
@@ -14,6 +16,7 @@ pub mod client;
 pub mod codec;
 pub mod error;
 pub mod raw;
+pub mod stream;
 mod verb;
 
 pub use client::{
@@ -23,4 +26,5 @@ pub use client::{
 pub use codec::compress::Compression;
 pub use codec::serialize::{Decode, Encode, from_payload, to_payload};
 pub use error::{DecodeError, Error, RemoteMessage, Result};
+pub use stream::{StreamConnection, StreamId, StreamSink, StreamSource};
 pub use verb::Verb;

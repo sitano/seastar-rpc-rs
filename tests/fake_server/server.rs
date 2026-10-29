@@ -12,6 +12,7 @@ use seastar_rpc::rpc::codec::frame::{
 };
 use seastar_rpc::rpc::codec::negotiation::{Features, read_negotiation, write_negotiation};
 use seastar_rpc::rpc::codec::serialize::{from_payload, to_payload};
+use seastar_rpc::rpc::codec::stream::StreamCodec;
 use tokio::net::TcpListener;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -79,6 +80,69 @@ where
             offer,
         })
         .await;
+    });
+    addr
+}
+
+/// Server side of a stream connection.
+pub struct StreamPeer {
+    pub source: FramedRead<OwnedReadHalf, CompressionCodec<StreamCodec>>,
+    pub sink: FramedWrite<OwnedWriteHalf, CompressionCodec<StreamCodec>>,
+}
+
+/// Id the streaming server gives the stream connection.
+pub const STREAM_ID: u64 = (2 << 16) | 1;
+
+/// Like [`serve`], but also accepts one stream connection after the parent
+/// one, checks its offer and answers it with `CONNECTION_ID =`
+/// [`STREAM_ID`]. The script runs once both are negotiated.
+pub async fn serve_streaming<F, Fut>(reply: Features, script: F) -> SocketAddr
+where
+    F: FnOnce(Server, StreamPeer) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let layout = FrameLayout::new(&reply, 1 << 20);
+        let compression = reply.compress.as_deref().and_then(Compression::from_name);
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let (mut read, mut write) = stream.into_split();
+        let offer = read_negotiation(&mut read).await.unwrap();
+        write_negotiation(&mut write, &reply).await.unwrap();
+        let server = Server {
+            requests: FramedRead::new(
+                read,
+                CompressionCodec::new(RequestCodec::new(layout), layout, compression),
+            ),
+            responses: FramedWrite::new(
+                write,
+                CompressionCodec::new(ResponseCodec::new(layout), layout, compression),
+            ),
+            offer,
+        };
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let (mut read, mut write) = stream.into_split();
+        let offer = read_negotiation(&mut read).await.unwrap();
+
+        assert_eq!(offer.stream_parent, reply.connection_id);
+        assert!(!offer.timeout, "stream connections don't offer TIMEOUT");
+        assert_eq!(offer.compress, server.offer.compress);
+
+        let mut stream_reply = reply.clone();
+        stream_reply.timeout = false;
+        stream_reply.connection_id = Some(STREAM_ID);
+        write_negotiation(&mut write, &stream_reply).await.unwrap();
+
+        let codec = || CompressionCodec::new(StreamCodec::new(layout), layout, compression);
+        let peer = StreamPeer {
+            source: FramedRead::new(read, codec()),
+            sink: FramedWrite::new(write, codec()),
+        };
+
+        script(server, peer).await;
     });
     addr
 }
